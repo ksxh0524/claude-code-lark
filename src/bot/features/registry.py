@@ -49,9 +49,7 @@ class FeatureRegistry:
         # Git integration - conditionally enabled
         if self.config.enable_git_integration:
             try:
-                self.features["git"] = GitIntegration(
-                    config=self.config, security=self.security
-                )
+                self.features["git"] = GitIntegration(settings=self.config)
                 logger.info("Git integration feature enabled")
             except Exception as e:
                 logger.error("Failed to initialize git integration", error=str(e))

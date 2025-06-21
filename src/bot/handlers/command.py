@@ -884,7 +884,7 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             status_message += f"⬇️ Behind: {git_status.behind} commits\n"
 
         # Show file changes
-        if git_status.has_changes():
+        if not git_status.is_clean:
             status_message += f"\n**Changes:**\n"
             if git_status.modified:
                 status_message += f"📝 Modified: {len(git_status.modified)} files\n"
@@ -896,13 +896,6 @@ async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 status_message += f"❓ Untracked: {len(git_status.untracked)} files\n"
         else:
             status_message += "\n✅ Working directory clean\n"
-
-        # Show recent commits
-        if git_status.recent_commits:
-            status_message += f"\n**Recent Commits:**\n"
-            for commit in git_status.recent_commits[:3]:  # Show last 3
-                short_hash = commit.hash[:7]
-                status_message += f"• `{short_hash}` {commit.message[:50]}{'...' if len(commit.message) > 50 else ''}\n"
 
         # Create action buttons
         keyboard = [

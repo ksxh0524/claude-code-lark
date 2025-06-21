@@ -65,6 +65,7 @@ class GitIntegration:
         "ls-files",
         "ls-tree",
         "rev-parse",
+        "rev-list",
         "describe",
     }
 

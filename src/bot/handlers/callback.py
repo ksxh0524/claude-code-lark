@@ -1002,14 +1002,18 @@ async def handle_git_callback(
             if not diff_output.strip():
                 diff_message = "📊 **Git Diff**\n\n_No changes to show._"
             else:
+                # Clean up diff output for Telegram
+                # Remove emoji symbols that interfere with markdown parsing
+                clean_diff = diff_output.replace("➕", "+").replace("➖", "-").replace("📍", "@")
+                
                 # Limit diff output
                 max_length = 2000
-                if len(diff_output) > max_length:
-                    diff_output = (
-                        diff_output[:max_length] + "\n\n_... output truncated ..._"
+                if len(clean_diff) > max_length:
+                    clean_diff = (
+                        clean_diff[:max_length] + "\n\n_... output truncated ..._"
                     )
 
-                diff_message = f"📊 **Git Diff**\n\n```\n{diff_output}\n```"
+                diff_message = f"📊 **Git Diff**\n\n```\n{clean_diff}\n```"
 
             keyboard = [
                 [
