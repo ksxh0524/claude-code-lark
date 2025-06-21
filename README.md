@@ -41,55 +41,66 @@ Bot: 🤖 I'll help you add robust error handling to your API...
 This project is actively being developed. Here's the current status of features:
 
 #### ✅ **Working Features**
-- Basic Telegram bot functionality with command handling
-- Directory navigation (`cd`, `ls`, `pwd`)
-- User authentication (whitelist-based)
-- Rate limiting and security controls
-- Basic Claude integration for conversations
-- File upload handling
-- Session management (in-memory)
+- Full Telegram bot functionality with advanced command handling
+- Directory navigation (`cd`, `ls`, `pwd`) with project switching
+- Multi-layer authentication (whitelist + optional token-based)
+- Advanced rate limiting with token bucket algorithm
+- Complete Claude integration with SDK/CLI support
+- **✨ Enhanced file upload handling with archive extraction**
+- **✨ Git integration with safe repository operations**
+- **✨ Quick actions system with context-aware buttons**
+- **✨ Session export in Markdown, HTML, and JSON formats**
+- **✨ Image/screenshot upload with smart analysis prompts**
+- **✨ Conversation enhancements with follow-up suggestions**
+- SQLite database persistence with migrations
+- Comprehensive usage and cost tracking
+- Session management with persistence
+- Audit logging and security event tracking
 
-#### 🔄 **Work in Progress**
-The following features are partially implemented or planned:
+#### 🚀 **New Advanced Features**
+- **📦 Archive Analysis**: Upload ZIP/TAR files for comprehensive project analysis
+- **🔄 Git Operations**: View status, diffs, logs, and commit history
+- **⚡ Quick Actions**: Context-aware buttons for tests, linting, formatting, etc.
+- **📤 Session Export**: Download conversation history in multiple formats
+- **🖼️ Image Support**: Upload screenshots and diagrams for analysis
+- **💡 Smart Suggestions**: AI-powered follow-up action recommendations
 
-- **Streaming Responses** - Currently shows progress updates, not true streaming
-- **Quick Actions** - Buttons exist but execution not yet connected
-- **Session Export** - Command exists but export functionality pending
-- **Git Integration** - Planned but not implemented
-- **Image/Screenshot Support** - Handler exists but processing not implemented
-- **Command History** - Tracking not yet implemented
-- **Database Persistence** - Using in-memory storage, SQLite integration pending
-- **Usage Analytics** - Basic cost tracking only, detailed analytics pending
-- **Multi-Provider Auth** - Only whitelist auth currently supported
-- **Advanced Error Recovery** - Basic error handling only
-- **Project Context Switching** - Limited context persistence
-- **Telemetry/Monitoring** - Not yet implemented
+#### 🔄 **Planned Enhancements**
+- True streaming responses with real-time updates
+- Claude vision API integration for full image analysis
+- Custom quick actions configuration
+- Advanced Git operations (when security permits)
+- Plugin system for third-party extensions
+- Multi-language code execution
+- Webhook support for CI/CD integration
 
 ### 🤖 Claude AI Integration
 - **Full Claude Code Access**: Complete integration with Claude's powerful coding assistant
-- **Session Persistence**: Maintain conversation context across multiple interactions *(in-memory only)*
-- **Streaming Responses**: Real-time response streaming for immediate feedback *(work in progress)*
-- **Error Recovery**: Intelligent error handling with helpful suggestions *(basic implementation)*
+- **Session Persistence**: Maintain conversation context with SQLite database storage
+- **SDK & CLI Support**: Works with both Anthropic Python SDK and Claude CLI
+- **Error Recovery**: Intelligent error handling with helpful suggestions and retry logic
 - **Tool Support**: Access to Claude's full toolkit including file operations, code analysis, and more
 
 ### 📱 Terminal-like Interface  
 - **Directory Navigation**: `cd`, `ls`, `pwd` commands just like a real terminal
-- **File Management**: Upload files for Claude to review and analyze
-- **Project Switching**: Easy navigation between different codebases *(limited context persistence)*
-- **Command History**: Track your recent commands and sessions *(not yet implemented)*
+- **File Management**: Upload files, archives, and images for Claude to analyze
+- **Git Integration**: View repository status, diffs, and commit history
+- **Project Switching**: Easy navigation between different codebases with context preservation
+- **Command History**: Full session tracking with export capabilities
 
 ### 🛡️ Enterprise-Grade Security
-- **Access Control**: Whitelist-based user authentication
+- **Multi-Layer Authentication**: Whitelist-based and optional token authentication
 - **Directory Isolation**: Strict sandboxing to approved project directories
-- **Rate Limiting**: Prevent abuse with configurable request and cost limits  
-- **Audit Logging**: Complete tracking of all user actions and security events *(basic implementation)*
-- **Input Validation**: Protection against injection attacks and directory traversal
+- **Rate Limiting**: Token bucket algorithm with request and cost-based limits
+- **Comprehensive Audit Logging**: Complete tracking of all user actions and security events
+- **Input Validation**: Protection against injection attacks, path traversal, and zip bombs
 
 ### ⚡ Developer Experience
-- **Quick Actions**: One-click buttons for common tasks (test, lint, build) *(UI only, execution pending)*
-- **Session Management**: Start, continue, end, and monitor Claude sessions
-- **Usage Tracking**: Monitor your Claude API usage and costs *(basic implementation)*
-- **Responsive Design**: Clean, mobile-friendly interface with emoji indicators
+- **Quick Actions**: Context-aware buttons for tests, linting, formatting, and more
+- **Session Management**: Start, continue, end, export, and monitor Claude sessions
+- **Usage Analytics**: Detailed cost tracking, usage patterns, and system statistics
+- **Responsive Design**: Clean, mobile-friendly interface with inline keyboards
+- **Smart Follow-ups**: AI-powered suggestions for next actions based on context
 
 ## 🛠️ Installation
 
@@ -196,6 +207,13 @@ Once your bot is running, you can use these commands in Telegram:
 /continue [message]   # Continue previous session (optionally with message)
 /end                  # End current session
 /status               # Show session status and usage
+/export               # Export session (choose format: Markdown, HTML, JSON)
+```
+
+#### Advanced Features
+```
+/git                  # Show git repository info (status, diff, log)
+/actions              # Show context-aware quick actions
 ```
 
 #### Getting Help
@@ -217,9 +235,15 @@ You: "Explain what this code does"
 
 ### File Operations
 
-**Upload files:** Simply send a file to Telegram and Claude will analyze it.
+**Upload files:** Simply send files to Telegram and Claude will analyze them.
 
-**Supported file types:** `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.java`, `.cpp`, `.c`, `.go`, `.rs`, `.rb`, `.php`, `.swift`, `.kt`, `.scala`, `.sql`, `.json`, `.xml`, `.html`, `.css`, `.md`, `.txt`, `.yaml`, `.toml`, and more.
+**Supported operations:**
+- **Single files**: Code files, configs, documents - Claude analyzes content
+- **Archives**: ZIP/TAR files - Extracts and analyzes project structure
+- **Images**: Screenshots, diagrams, UI mockups - Smart prompt generation
+- **Multiple files**: Send several files for batch analysis
+
+**Supported file types:** `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.java`, `.cpp`, `.c`, `.go`, `.rs`, `.rb`, `.php`, `.swift`, `.kt`, `.scala`, `.sql`, `.json`, `.xml`, `.html`, `.css`, `.md`, `.txt`, `.yaml`, `.toml`, `.zip`, `.tar`, `.tar.gz`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, and more.
 
 ### Example Workflow
 
@@ -242,6 +266,69 @@ You: "Explain what this code does"
         📂 Directory: my-web-app/
         🤖 Claude Session: ✅ Active  
         💰 Usage: $0.15 / $10.00 (2%)
+```
+
+### Advanced Features Examples
+
+#### 📦 Archive Analysis
+```
+You: [Upload project.zip]
+Bot: 📦 Analyzing archive: project.zip
+     
+     Project Structure:
+     📁 src/
+       📄 main.py (2.3KB)
+       📄 utils.py (1.1KB)
+     📁 tests/
+       📄 test_main.py (3.2KB)
+     📄 requirements.txt (245B)
+     
+     Language: Python
+     Frameworks: pytest detected
+     Entry point: src/main.py
+     
+     🤖 I've analyzed your Python project. It appears to be...
+```
+
+#### 🔄 Git Integration  
+```
+You: /git
+Bot: 📊 Git Repository Status
+     
+     🌿 Branch: feature/new-api
+     📝 Changes: 3 files modified
+     🔄 Behind main: 2 commits
+     
+     Recent commits:
+     • abc123 - Add API endpoint (2 hours ago)
+     • def456 - Update dependencies (1 day ago)
+     
+     [View Diff] [Show Log] [See Changes]
+```
+
+#### ⚡ Quick Actions
+```
+You: /actions
+Bot: 🚀 Available Quick Actions
+     
+     Based on your project context:
+     [🧪 Run Tests] [📦 Install Deps]
+     [🎨 Format Code] [🔍 Run Linter]
+     [📝 Add Docs] [🔧 Refactor]
+```
+
+#### 📤 Session Export
+```
+You: /export
+Bot: 📤 Export Session
+     
+     Choose format:
+     [📝 Markdown] [🌐 HTML] [📋 JSON]
+     
+You: [Click Markdown]
+Bot: ✅ Session exported!
+     📎 claude_session_abc123.md (15.2KB)
+     [Downloads as file in Telegram]
 ```
 
 ### Quick Actions
