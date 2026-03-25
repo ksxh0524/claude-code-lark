@@ -6,6 +6,7 @@ classic mode, delegates to existing full-featured handlers.
 """
 
 import asyncio
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -1729,3 +1730,118 @@ class MessageOrchestrator:
                 args=[project_name],
                 success=True,
             )
+
+    # --- Lark platform handlers ---
+
+    async def handle_message(self, event_data: Dict[str, Any]) -> None:
+        """Handle incoming message from Lark platform - reuses agentic logic."""
+        message = event_data.get("message", {})
+        sender = event_data.get("sender", {})
+        chat_id = message.get("chat_id", "")
+        content_raw = message.get("content", "{}")
+
+        # Parse content
+        try:
+            content = json.loads(content_raw) if isinstance(content_raw, str) else content_raw
+            text = content.get("text", "")
+        except json.JSONDecodeError:
+            text = ""
+
+        if not text:
+            return
+
+        user_id = sender.get("open_id", "unknown")
+        logger.info("Lark message", chat_id=chat_id, user_id=user_id, text=text[:50])
+
+        # Skip if command (handled by handle_command)
+        if text.startswith("/"):
+            await self.handle_command(event_data)
+            return
+
+        # Get adapter and claude_integration - same as Telegram
+        adapter = self.deps.get("adapter")
+        claude_integration = self.deps.get("claude_integration")
+
+        if not adapter or not claude_integration:
+            logger.error("Missing adapter or claude_integration")
+            if adapter:
+                await adapter.send_message(chat_id, "❌ Claude 未配置")
+            return
+
+        # Send "working" message
+        await adapter.send_message(chat_id, "⏳ 正在处理...")
+
+        try:
+            # Call Claude - same logic as agentic_text
+            working_dir = Path(self.settings.approved_directory)
+
+            async for event in claude_integration.run_command(
+                command=text,
+                working_directory=str(working_dir),
+                user_id=hash(user_id) % 1000000,  # Convert to int
+            ):
+                # Handle different event types
+                if event.get("type") == "assistant_response":
+                    response_text = event.get("content", "")
+                    if response_text:
+                        await adapter.send_message(chat_id, response_text)
+                elif event.get("type") == "error":
+                    await adapter.send_message(chat_id, f"❌ 错误: {event.get('message', 'Unknown error')}")
+                    break
+
+        except Exception as e:
+            logger.error("Claude execution error", error=str(e))
+            await adapter.send_message(chat_id, f"❌ 执行出错: {str(e)}")
+
+    async def handle_command(self, event_data: Dict[str, Any]) -> None:
+        """Handle command from Lark platform."""
+        import structlog
+        logger = structlog.get_logger()
+
+        message = event_data.get("message", {})
+        sender = event_data.get("sender", {})
+        chat_id = message.get("chat_id", "")
+        content_raw = message.get("content", "{}")
+
+        # Parse content
+        try:
+            content = json.loads(content_raw) if isinstance(content_raw, str) else content_raw
+            text = content.get("text", "")
+        except json.JSONDecodeError:
+            text = ""
+
+        logger.info(
+            "Lark command received",
+            chat_id=chat_id,
+            text=text[:50] if text else "",
+            sender_open_id=sender.get("open_id", ""),
+        )
+
+        if not text:
+            return
+
+        # Get adapter to send reply
+        adapter = self.deps.get("adapter")
+        if not adapter:
+            logger.error("No adapter available for Lark reply")
+            return
+
+        # Parse command
+        command = text.strip().lstrip("/").split()[0] if text else ""
+
+        if command == "start":
+            await adapter.send_message(chat_id, "👋 欢迎使用 Claude Code Bot!\n\n发送任意消息与我对话。")
+        elif command == "help":
+            await adapter.send_message(chat_id, "可用命令:\n/start - 开始\n/help - 帮助\n/status - 状态")
+        elif command == "status":
+            await adapter.send_message(chat_id, "✅ Bot 运行正常\n平台: Lark/飞书")
+        else:
+            # Unknown command, pass to message handler
+            await self.handle_message(event_data)
+
+    async def handle_callback(self, event_data: Dict[str, Any]) -> None:
+        """Handle callback from Lark platform (button clicks)."""
+        import structlog
+        logger = structlog.get_logger()
+
+        logger.info("Lark callback received", event_data=event_data)

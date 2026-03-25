@@ -4,11 +4,12 @@ Runs in the same process as the bot, sharing the event loop.
 Receives external webhooks and publishes them as events on the bus.
 """
 
+import json
 import uuid
 from typing import Any, Dict, Optional
 
 import structlog
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 
 from ..config.settings import Settings
 from ..events.bus import EventBus
@@ -36,6 +37,76 @@ def create_api_app(
     @app.get("/health")
     async def health_check() -> Dict[str, str]:
         return {"status": "ok"}
+
+    @app.post("/lark/webhook")
+    async def receive_lark_webhook(
+        request: Request,
+    ) -> Response:
+        """Receive webhook from Lark/Feishu.
+
+        Handles URL verification challenge and message events.
+        """
+        body = await request.body()
+
+        try:
+            payload: Dict[str, Any] = json.loads(body)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON")
+
+        # Handle URL verification challenge
+        if payload.get("type") == "url_verification":
+            challenge = payload.get("challenge", "")
+            logger.info("Lark URL verification challenge received")
+            return Response(content=challenge, media_type="text/plain")
+
+        # Handle other events
+        event_type = payload.get("type", payload.get("header", {}).get("event_type", "unknown"))
+        event_id = payload.get("header", {}).get("event_id", str(uuid.uuid4()))
+
+        logger.info(
+            "Lark webhook received",
+            event_type=event_type,
+            event_id=event_id,
+        )
+
+        # Publish to event bus
+        event = WebhookEvent(
+            provider="lark",
+            event_type_name=event_type,
+            payload=payload,
+            delivery_id=event_id,
+        )
+        await event_bus.publish(event)
+
+        return Response(content="ok", media_type="text/plain")
+
+    @app.post("/lark/card")
+    async def receive_lark_card_callback(
+        request: Request,
+    ) -> Response:
+        """Receive card action callbacks from Lark/Feishu."""
+        body = await request.body()
+
+        try:
+            payload: Dict[str, Any] = json.loads(body)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON")
+
+        logger.info(
+            "Lark card callback received",
+            payload=payload,
+        )
+
+        # Publish to event bus for handling
+        event = WebhookEvent(
+            provider="lark",
+            event_type_name="card.action.trigger",
+            payload=payload,
+            delivery_id=str(uuid.uuid4()),
+        )
+        await event_bus.publish(event)
+
+        return Response(content="ok", media_type="text/plain")
 
     @app.post("/webhooks/{provider}")
     async def receive_webhook(

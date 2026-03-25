@@ -37,6 +37,11 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry]
 packages = [{include = "src"}]
 
+[[tool.poetry.source]]
+name = "tsinghua"
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+priority = "primary"
+
 [tool.poetry.dependencies]
 python = "^3.11"
 python-telegram-bot = {version = "^22.6", extras = ["rate-limiter"]}

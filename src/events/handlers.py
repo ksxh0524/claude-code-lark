@@ -53,6 +53,11 @@ class AgentHandler:
             delivery_id=event.delivery_id,
         )
 
+        # Handle Lark card action callbacks separately
+        if event.provider == "lark" and event.event_type_name == "card.action.trigger":
+            await self._handle_lark_card_callback(event)
+            return
+
         prompt = self._build_webhook_prompt(event)
 
         try:
@@ -130,6 +135,28 @@ class AgentHandler:
             logger.exception(
                 "Agent execution failed for scheduled event",
                 job_id=event.job_id,
+                event_id=event.id,
+            )
+
+    async def _handle_lark_card_callback(self, event: WebhookEvent) -> None:
+        """Handle Lark card action callback (e.g., stop button)."""
+        logger.info(
+            "Handling Lark card callback",
+            event_id=event.id,
+            payload=event.payload,
+        )
+
+        # Get Lark adapter from deps
+        adapter = self.deps.get("adapter")
+        if not adapter or not hasattr(adapter, "handle_card_callback"):
+            logger.warning("No Lark adapter available for card callback")
+            return
+
+        try:
+            await adapter.handle_card_callback(event.payload)
+        except Exception:
+            logger.exception(
+                "Failed to handle Lark card callback",
                 event_id=event.id,
             )
 

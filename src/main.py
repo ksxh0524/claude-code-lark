@@ -12,6 +12,7 @@ import structlog
 
 from src import __version__
 from src.bot.core import ClaudeCodeBot
+from src.bot.core_multiplatform import MultiPlatformBot
 from src.claude import (
     ClaudeIntegration,
     SessionManager,
@@ -181,9 +182,16 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "event_bus": event_bus,
         "project_registry": None,
         "project_threads_manager": None,
+        "security": security_validator,  # For feature registry
     }
 
-    bot = ClaudeCodeBot(config, dependencies)
+    # Choose bot implementation based on platform
+    if config.platform == "lark":
+        bot = MultiPlatformBot(config, dependencies)
+        logger.info("Using multi-platform bot for Lark")
+    else:
+        bot = ClaudeCodeBot(config, dependencies)
+        logger.info("Using Telegram bot")
 
     # Notification service and scheduler need the bot's Telegram Bot instance,
     # which is only available after bot.initialize(). We store placeholders
@@ -207,7 +215,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
 async def run_application(app: Dict[str, Any]) -> None:
     """Run the application with graceful shutdown handling."""
     logger = structlog.get_logger()
-    bot: ClaudeCodeBot = app["bot"]
+    bot = app["bot"]  # Can be ClaudeCodeBot or MultiPlatformBot
     claude_integration: ClaudeIntegration = app["claude_integration"]
     storage: Storage = app["storage"]
     config: Settings = app["config"]
@@ -229,65 +237,72 @@ async def run_application(app: Dict[str, Any]) -> None:
     signal.signal(signal.SIGTERM, signal_handler)
 
     try:
-        logger.info("Starting Claude Code Telegram Bot")
+        logger.info("Starting Claude Code Bot", platform=config.platform)
 
-        # Initialize the bot first (creates the Telegram Application)
+        # Initialize the bot first
         await bot.initialize()
 
-        if config.enable_project_threads:
-            if not config.projects_config_path:
-                raise ConfigurationError(
-                    "Project thread mode enabled but required settings are missing"
-                )
-            registry = load_project_registry(
-                config_path=config.projects_config_path,
-                approved_directory=config.approved_directory,
-            )
-            project_threads_manager = ProjectThreadManager(
-                registry=registry,
-                repository=storage.project_threads,
-                sync_action_interval_seconds=(
-                    config.project_threads_sync_action_interval_seconds
-                ),
-            )
+        # Platform-specific setup
+        is_lark = config.platform == "lark"
+        telegram_bot = None
 
-            bot.deps["project_registry"] = registry
-            bot.deps["project_threads_manager"] = project_threads_manager
-
-            if config.project_threads_mode == "group":
-                if config.project_threads_chat_id is None:
+        if not is_lark:
+            # Telegram-specific setup
+            if config.enable_project_threads:
+                if not config.projects_config_path:
                     raise ConfigurationError(
-                        "Group thread mode requires PROJECT_THREADS_CHAT_ID"
+                        "Project thread mode enabled but required settings are missing"
                     )
-                sync_result = await project_threads_manager.sync_topics(
-                    bot.app.bot,
-                    chat_id=config.project_threads_chat_id,
+                registry = load_project_registry(
+                    config_path=config.projects_config_path,
+                    approved_directory=config.approved_directory,
                 )
-                logger.info(
-                    "Project thread startup sync complete",
-                    mode=config.project_threads_mode,
-                    chat_id=config.project_threads_chat_id,
-                    created=sync_result.created,
-                    reused=sync_result.reused,
-                    renamed=sync_result.renamed,
-                    failed=sync_result.failed,
-                    deactivated=sync_result.deactivated,
+                project_threads_manager = ProjectThreadManager(
+                    registry=registry,
+                    repository=storage.project_threads,
+                    sync_action_interval_seconds=(
+                        config.project_threads_sync_action_interval_seconds
+                    ),
                 )
 
-        # Now wire up components that need the Telegram Bot instance
-        telegram_bot = bot.app.bot
+                bot.deps["project_registry"] = registry
+                bot.deps["project_threads_manager"] = project_threads_manager
+
+                if config.project_threads_mode == "group":
+                    if config.project_threads_chat_id is None:
+                        raise ConfigurationError(
+                            "Group thread mode requires PROJECT_THREADS_CHAT_ID"
+                        )
+                    sync_result = await project_threads_manager.sync_topics(
+                        bot.app.bot,
+                        chat_id=config.project_threads_chat_id,
+                    )
+                    logger.info(
+                        "Project thread startup sync complete",
+                        mode=config.project_threads_mode,
+                        chat_id=config.project_threads_chat_id,
+                        created=sync_result.created,
+                        reused=sync_result.reused,
+                        renamed=sync_result.renamed,
+                        failed=sync_result.failed,
+                        deactivated=sync_result.deactivated,
+                    )
+
+            # Get Telegram bot instance for notification service
+            telegram_bot = bot.app.bot
 
         # Start event bus
         await event_bus.start()
 
-        # Notification service
-        notification_service = NotificationService(
-            event_bus=event_bus,
-            bot=telegram_bot,
-            default_chat_ids=config.notification_chat_ids or [],
-        )
-        notification_service.register()
-        await notification_service.start()
+        # Notification service (only for Telegram)
+        if telegram_bot:
+            notification_service = NotificationService(
+                event_bus=event_bus,
+                bot=telegram_bot,
+                default_chat_ids=config.notification_chat_ids or [],
+            )
+            notification_service.register()
+            await notification_service.start()
 
         # Collect concurrent tasks
         tasks = []
@@ -296,8 +311,8 @@ async def run_application(app: Dict[str, Any]) -> None:
         bot_task = asyncio.create_task(bot.start())
         tasks.append(bot_task)
 
-        # API server (if enabled)
-        if features.api_server_enabled:
+        # API server (if enabled or if Lark platform requires it)
+        if features.api_server_enabled or is_lark:
             from src.api.server import run_api_server
 
             api_task = asyncio.create_task(

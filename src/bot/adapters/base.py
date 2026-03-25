@@ -1,4 +1,4 @@
-Abstract base class for platform adapters."""
+"""Abstract base class for platform adapters."""
 
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Union

@@ -9,6 +9,7 @@ from src.bot.adapters.base import PlatformAdapter
 from src.bot.adapters.factory import PlatformFactory
 from src.config.settings import Settings
 from src.exceptions import ClaudeCodeTelegramError
+from .core_engine import CoreEngine
 from .features.registry import FeatureRegistry
 from .orchestrator import MessageOrchestrator
 
@@ -26,6 +27,7 @@ class MultiPlatformBot:
         self.is_running = False
         self.feature_registry: Optional[FeatureRegistry] = None
         self.orchestrator = MessageOrchestrator(settings, dependencies)
+        self.core_engine: Optional[CoreEngine] = None
 
     async def initialize(self) -> None:
         """Initialize bot application. Idempotent — safe to call multiple times."""
@@ -34,11 +36,34 @@ class MultiPlatformBot:
 
         logger.info("Initializing multi-platform bot", platform=self.settings.platform)
 
+        # Create CoreEngine
+        self.core_engine = CoreEngine(
+            claude_integration=self.deps.get("claude_integration"),
+            settings=self.settings,
+            deps={
+                "rate_limiter": self.deps.get("rate_limiter"),
+                "security": self.deps.get("security_validator"),
+                "storage": self.deps.get("storage"),
+            },
+        )
+        self.deps["core_engine"] = self.core_engine
+
         # Create platform adapter
         self.adapter = PlatformFactory.create_adapter(self.settings)
 
         # Initialize platform adapter
         await self.adapter.initialize()
+
+        # Inject CoreEngine and settings for Lark
+        if hasattr(self.adapter, "core_engine"):
+            self.adapter.core_engine = self.core_engine
+        if hasattr(self.adapter, "settings"):
+            self.adapter.settings = self.settings
+
+        # Add adapter to deps so handlers can reply
+        self.deps["adapter"] = self.adapter
+        self.orchestrator.deps["adapter"] = self.adapter
+        self.orchestrator.deps["core_engine"] = self.core_engine
 
         # Initialize feature registry
         self.feature_registry = FeatureRegistry(
