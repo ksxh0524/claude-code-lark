@@ -1,13 +1,13 @@
 [project]
-name = "claude-code-telegram"
-version = "1.5.0"
-description = "Telegram bot for remote Claude Code access with comprehensive configuration management"
+name = "claude-code-lark"
+version = "2.0.0"
+description = "Multi-platform bot for remote Claude Code access supporting Telegram and Lark/Feishu"
 readme = "README.md"
 license = "MIT"
 authors = [
     {name = "Richard Atkinson", email = "richardatk01@gmail.com"},
 ]
-keywords = ["telegram", "bot", "claude", "ai", "development", "remote", "coding"]
+keywords = ["telegram", "lark", "feishu", "bot", "claude", "ai", "development", "remote", "coding", "multi-platform"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -23,12 +23,12 @@ requires-python = ">=3.11"
 dynamic = ["dependencies"]
 
 [project.urls]
-Homepage = "https://github.com/richardatkinson/claude-code-telegram"
-Repository = "https://github.com/richardatkinson/claude-code-telegram"
-Documentation = "https://github.com/richardatkinson/claude-code-telegram/blob/main/docs/"
+Homepage = "https://github.com/yourusername/claude-code-lark"
+Repository = "https://github.com/yourusername/claude-code-lark"
+Documentation = "https://github.com/yourusername/claude-code-lark/blob/main/docs/"
 
 [project.scripts]
-claude-telegram-bot = "src.main:run"
+claude-bot = "src.main:run"
 
 [build-system]
 requires = ["poetry-core>=2.0.0"]
@@ -40,6 +40,7 @@ packages = [{include = "src"}]
 [tool.poetry.dependencies]
 python = "^3.11"
 python-telegram-bot = {version = "^22.6", extras = ["rate-limiter"]}
+lark-oapi = "^1.2.0"
 structlog = "^25.4.0"
 pydantic = "^2.11.5"
 pydantic-settings = "^2.9.1"

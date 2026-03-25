@@ -1,19 +1,25 @@
-# Claude Code Telegram Bot
+# Claude Code Multi-Platform Bot
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-A Telegram bot that gives you remote access to [Claude Code](https://claude.ai/code). Chat naturally with Claude about your projects from anywhere -- no terminal commands needed.
+A multi-platform bot that gives you remote access to [Claude Code](https://claude.ai/code). Chat naturally with Claude about your projects from anywhere -- no terminal commands needed.
+
+## 🌍 Supported Platforms
+
+- **Telegram** - The world's most secure messaging platform
+- **Lark/Feishu** - Enterprise collaboration platform (飞书)
 
 ## What is this?
 
-This bot connects Telegram to Claude Code, providing a conversational AI interface for your codebase:
+This bot connects your favorite messaging platform to Claude Code, providing a conversational AI interface for your codebase:
 
 - **Chat naturally** -- ask Claude to analyze, edit, or explain your code in plain language
 - **Maintain context** across conversations with automatic session persistence per project
-- **Code on the go** from any device with Telegram
+- **Code on the go** from any device with your messaging app
 - **Receive proactive notifications** from webhooks, scheduled jobs, and CI/CD events
 - **Stay secure** with built-in authentication, directory sandboxing, and audit logging
+- **Multi-platform** -- switch between Telegram and Lark seamlessly
 
 ## Quick Start
 
@@ -35,34 +41,17 @@ Bot: Running pytest...
 
 - **Python 3.11+** -- [Download here](https://www.python.org/downloads/)
 - **Claude Code CLI** -- [Install from here](https://claude.ai/code)
-- **Telegram Bot Token** -- Get one from [@BotFather](https://t.me/botfather)
+- **Platform credentials**:
+  - **Telegram**: Bot token from [@BotFather](https://t.me/botfather)
+  - **Lark/Feishu**: App credentials from [Open Platform](https://open.feishu.cn/)
 
 ### 2. Install
 
-Choose your preferred method:
-
-#### Option A: Install from a release tag (Recommended)
-
 ```bash
-# Using uv (recommended — installs in an isolated environment)
-uv tool install git+https://github.com/RichardAtCT/claude-code-telegram@v1.3.0
-
-# Or using pip
-pip install git+https://github.com/RichardAtCT/claude-code-telegram@v1.3.0
-
-# Track the latest stable release
-pip install git+https://github.com/RichardAtCT/claude-code-telegram@latest
-```
-
-#### Option B: From source (for development)
-
-```bash
-git clone https://github.com/RichardAtCT/claude-code-telegram.git
-cd claude-code-telegram
+git clone https://github.com/yourusername/claude-code-lark.git
+cd claude-code-lark
 make dev  # requires Poetry
 ```
-
-> **Note:** Always install from a tagged release (not `main`) for stability. See [Releases](https://github.com/RichardAtCT/claude-code-telegram/releases) for available versions.
 
 ### 3. Configure
 
@@ -72,11 +61,22 @@ cp .env.example .env
 ```
 
 **Minimum required:**
+
 ```bash
+# Choose your platform
+PLATFORM=telegram  # or 'lark'
+
+# Telegram (if PLATFORM=telegram)
 TELEGRAM_BOT_TOKEN=1234567890:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 TELEGRAM_BOT_USERNAME=my_claude_bot
+
+# Lark/Feishu (if PLATFORM=lark)
+LARK_APP_ID=cli_xxxxxxxxx
+LARK_APP_SECRET=xxxxxxxxx
+
+# Common settings
 APPROVED_DIRECTORY=/Users/yourname/projects
-ALLOWED_USERS=123456789  # Your Telegram user ID
+ALLOWED_USERS=123456789  # Your user ID
 ```
 
 ### 4. Run
@@ -86,9 +86,68 @@ make run          # Production
 make run-debug    # With debug logging
 ```
 
-Message your bot on Telegram to get started.
+Message your bot on your chosen platform to get started.
 
-> **Detailed setup:** See [docs/setup.md](docs/setup.md) for Claude authentication options and troubleshooting.
+## Platform Setup Guides
+
+### Telegram Setup
+
+1. Create a bot on Telegram:
+   - Message [@BotFather](https://t.me/botfather)
+   - Send `/newbot`
+   - Follow instructions to create your bot
+   - Copy the bot token
+
+2. Get your Telegram User ID:
+   - Message [@userinfobot](https://t.me/userinfobot)
+   - Copy your user ID
+
+3. Configure `.env`:
+   ```bash
+   PLATFORM=telegram
+   TELEGRAM_BOT_TOKEN=your_token
+   TELEGRAM_BOT_USERNAME=your_bot_username
+   ALLOWED_USERS=your_user_id
+   ```
+
+### Lark/Feishu Setup
+
+1. Create a Lark/Feishu app:
+   - Visit [Open Platform](https://open.feishu.cn/app) (Feishu) or [https://open.larksuite.com/app](https://open.larksuite.com/app) (Lark)
+   - Click "Create App" → "Create App"
+   - Select "Enterprise Self-Built App" (企业自建应用)
+   - Copy App ID and App Secret
+
+2. Configure permissions:
+   - Go to "Permissions & Scopes"
+   - Add these scopes:
+     - `im:message` - Send and receive messages
+     - `im:message:group_at_msg` - Group messages
+     - `im:chat` - Access chat information
+     - `contact:user.base:readonly` - Read user information
+
+3. Configure events:
+   - Go to "Events" → "Add Event"
+   - Subscribe to: `im.message.receive_v1`
+
+4. Configure bot:
+   - Go to "Bot Configuration"
+   - Enable the bot
+   - Set a name and avatar
+
+5. Get your credentials:
+   - Copy `App ID` and `App Secret` from the app page
+   - (Optional) Generate `Encrypt Key` and `Verification Token` for webhooks
+
+6. Configure `.env`:
+   ```bash
+   PLATFORM=lark
+   LARK_APP_ID=cli_xxxxxxxxx
+   LARK_APP_SECRET=xxxxxxxxx
+   ALLOWED_USERS=your_open_id
+   ```
+
+See [LARK_SETUP.md](docs/LARK_SETUP.md) for detailed Feishu setup instructions.
 
 ## Modes
 
@@ -99,7 +158,6 @@ The bot supports two interaction modes:
 The default conversational mode. Just talk to Claude naturally -- no special commands required.
 
 **Commands:** `/start`, `/new`, `/status`, `/verbose`, `/repo`
-If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`
 
 ```
 You: What files are in this project?
@@ -116,49 +174,13 @@ Bot: Working... (8s)
      ✏️ Edit: http_client.py
      💻 Bash: poetry run pytest tests/ -v
 Bot: [Claude shows the changes and test results]
-
-You: /verbose 0
-Bot: Verbosity set to 0 (quiet)
 ```
-
-Use `/verbose 0|1|2` to control how much background activity is shown:
-
-| Level | Shows |
-|-------|-------|
-| **0** (quiet) | Final response only (typing indicator stays active) |
-| **1** (normal, default) | Tool names + reasoning snippets in real-time |
-| **2** (detailed) | Tool names with inputs + longer reasoning text |
-
-#### GitHub Workflow
-
-Claude Code already knows how to use `gh` CLI and `git`. Authenticate on your server with `gh auth login`, then work with repos conversationally:
-
-```
-You: List my repos related to monitoring
-Bot: [Claude runs gh repo list, shows results]
-
-You: Clone the uptime one
-Bot: [Claude runs gh repo clone, clones into workspace]
-
-You: /repo
-Bot: 📦 uptime-monitor/  ◀
-     📁 other-project/
-
-You: Show me the open issues
-Bot: [Claude runs gh issue list]
-
-You: Create a fix branch and push it
-Bot: [Claude creates branch, commits, pushes]
-```
-
-Use `/repo` to list cloned repos in your workspace, or `/repo <name>` to switch directories (sessions auto-resume).
 
 ### Classic Mode
 
-Set `AGENTIC_MODE=false` to enable the full 13-command terminal-like interface with directory navigation, inline keyboards, quick actions, git integration, and session export.
+Set `AGENTIC_MODE=false` to enable the full 13-command terminal-like interface.
 
-**Commands:** `/start`, `/help`, `/new`, `/continue`, `/end`, `/status`, `/cd`, `/ls`, `/pwd`, `/projects`, `/export`, `/actions`, `/git`  
-If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`
+**Commands:** `/start`, `/help`, `/new`, `/continue`, `/end`, `/status`, `/cd`, `/ls`, `/pwd`, `/projects`, `/export`, `/actions`, `/git`
 
 ```
 You: /cd my-web-app
@@ -175,131 +197,108 @@ Bot: [Run Tests] [Install Deps] [Format Code] [Run Linter]
 
 Beyond direct chat, the bot can respond to external triggers:
 
-- **Webhooks** -- Receive GitHub events (push, PR, issues) and route them through Claude for automated summaries or code review
+- **Webhooks** -- Receive events and route them through Claude for automated summaries or code review
 - **Scheduler** -- Run recurring Claude tasks on a cron schedule (e.g., daily code health checks)
-- **Notifications** -- Deliver agent responses to configured Telegram chats
+- **Notifications** -- Deliver agent responses to configured chats
 
-Enable with `ENABLE_API_SERVER=true` and `ENABLE_SCHEDULER=true`. See [docs/setup.md](docs/setup.md) for configuration.
+Enable with `ENABLE_API_SERVER=true` and `ENABLE_SCHEDULER=true`.
 
 ## Features
 
 ### Working Features
 
-- Conversational agentic mode (default) with natural language interaction
-- Classic terminal-like mode with 13 commands and inline keyboards
-- Full Claude Code integration with SDK (primary) and CLI (fallback)
-- Automatic session persistence per user/project directory
-- Multi-layer authentication (whitelist + optional token-based)
-- Rate limiting with token bucket algorithm
-- Directory sandboxing with path traversal prevention
-- File upload handling with archive extraction
-- Image/screenshot upload with analysis
-- Voice message transcription (Mistral Voxtral / OpenAI Whisper)
-- Git integration with safe repository operations
-- Quick actions system with context-aware buttons
-- Session export in Markdown, HTML, and JSON formats
-- SQLite persistence with migrations
-- Usage and cost tracking
-- Audit logging and security event tracking
-- Event bus for decoupled message routing
-- Webhook API server (GitHub HMAC-SHA256, generic Bearer token auth)
-- Job scheduler with cron expressions and persistent storage
-- Notification service with per-chat rate limiting
+- ✅ **Multi-platform support** - Telegram and Lark/Feishu
+- ✅ Conversational agentic mode with natural language interaction
+- ✅ Classic terminal-like mode with 13 commands
+- ✅ Full Claude Code integration with SDK
+- ✅ Automatic session persistence per user/project directory
+- ✅ Multi-layer authentication (whitelist + optional token-based)
+- ✅ Rate limiting with token bucket algorithm
+- ✅ Directory sandboxing with path traversal prevention
+- ✅ File upload handling with archive extraction
+- ✅ Image/screenshot upload with analysis
+- ✅ Voice message transcription (Mistral Voxtral / OpenAI Whisper)
+- ✅ Git integration with safe repository operations
+- ✅ Quick actions system with context-aware buttons
+- ✅ Session export in Markdown, HTML, and JSON formats
+- ✅ SQLite persistence with migrations
+- ✅ Usage and cost tracking
+- ✅ Audit logging and security event tracking
+- ✅ Event bus for decoupled message routing
+- ✅ Webhook API server
+- ✅ Job scheduler with cron expressions
+- ✅ Notification service with per-chat rate limiting
+- ✅ Platform-agnostic architecture for easy extension
 
-- Tunable verbose output showing Claude's tool usage and reasoning in real-time
-- Persistent typing indicator so users always know the bot is working
-- 16 configurable tools with allowlist/disallowlist control (see [docs/tools.md](docs/tools.md))
+### Platform-Specific Features
 
-### Planned Enhancements
+#### Telegram
+- Inline keyboards for interactive buttons
+- Bot command menu
+- Message threading and topics
+- HTML message formatting
+- Typing indicators
 
-- Plugin system for third-party extensions
+#### Lark/Feishu
+- Interactive card messages
+- Quick actions
+- Rich text with Markdown
+- Button interactions
+- Threaded conversations
 
 ## Configuration
 
 ### Required
 
 ```bash
-TELEGRAM_BOT_TOKEN=...           # From @BotFather
-TELEGRAM_BOT_USERNAME=...        # Your bot's username
-APPROVED_DIRECTORY=...           # Base directory for project access
-ALLOWED_USERS=123456789          # Comma-separated Telegram user IDs
+# Platform selection
+PLATFORM=telegram  # or 'lark'
+
+# Platform credentials (depends on PLATFORM)
+TELEGRAM_BOT_TOKEN=...  # Telegram only
+TELEGRAM_BOT_USERNAME=...  # Telegram only
+LARK_APP_ID=...  # Lark only
+LARK_APP_SECRET=...  # Lark only
+
+# Common settings
+APPROVED_DIRECTORY=...  # Base directory for project access
+ALLOWED_USERS=...  # Comma-separated user IDs
 ```
 
 ### Common Options
 
 ```bash
 # Claude
-ANTHROPIC_API_KEY=sk-ant-...     # API key (optional if using CLI auth)
-CLAUDE_MAX_COST_PER_USER=10.0    # Spending limit per user (USD)
-CLAUDE_TIMEOUT_SECONDS=300       # Operation timeout
+ANTHROPIC_API_KEY=sk-ant-...  # API key (optional if using CLI auth)
+CLAUDE_MAX_COST_PER_USER=10.0  # Spending limit per user (USD)
+CLAUDE_TIMEOUT_SECONDS=300  # Operation timeout
 
 # Mode
-AGENTIC_MODE=true                # Agentic (default) or classic mode
-VERBOSE_LEVEL=1                  # 0=quiet, 1=normal (default), 2=detailed
+AGENTIC_MODE=true  # Agentic (default) or classic mode
+VERBOSE_LEVEL=1  # 0=quiet, 1=normal, 2=detailed
 
 # Rate Limiting
-RATE_LIMIT_REQUESTS=10           # Requests per window
-RATE_LIMIT_WINDOW=60             # Window in seconds
-
-# Features (classic mode)
-ENABLE_GIT_INTEGRATION=true
-ENABLE_FILE_UPLOADS=true
-ENABLE_QUICK_ACTIONS=true
+RATE_LIMIT_REQUESTS=10  # Requests per window
+RATE_LIMIT_WINDOW=60  # Window in seconds
 ```
 
-### Agentic Platform
+See [docs/configuration.md](docs/configuration.md) for full reference.
+
+## Database Migration
+
+When upgrading from a single-platform version, run the database migration:
 
 ```bash
-# Webhook API Server
-ENABLE_API_SERVER=false          # Enable FastAPI webhook server
-API_SERVER_PORT=8080             # Server port
-
-# Webhook Authentication
-GITHUB_WEBHOOK_SECRET=...        # GitHub HMAC-SHA256 secret
-WEBHOOK_API_SECRET=...           # Bearer token for generic providers
-
-# Scheduler
-ENABLE_SCHEDULER=false           # Enable cron job scheduler
-
-# Notifications
-NOTIFICATION_CHAT_IDS=123,456    # Default chat IDs for proactive notifications
+python scripts/migrations/add_platform_support.py migrate
 ```
 
-### Project Threads Mode
-
-```bash
-# Enable strict topic routing by project
-ENABLE_PROJECT_THREADS=true
-
-# Mode: private (default) or group
-PROJECT_THREADS_MODE=private
-
-# YAML registry file (see config/projects.example.yaml)
-PROJECTS_CONFIG_PATH=config/projects.yaml
-
-# Required only when PROJECT_THREADS_MODE=group
-PROJECT_THREADS_CHAT_ID=-1001234567890
-
-# Minimum delay (seconds) between Telegram API calls during topic sync
-# Set 0 to disable pacing
-PROJECT_THREADS_SYNC_ACTION_INTERVAL_SECONDS=1.1
-```
-
-In strict mode, only `/start` and `/sync_threads` work outside mapped project topics.
-In private mode, `/start` auto-syncs project topics for your private bot chat.
-To use topics with your bot, enable them in BotFather:
-`Bot Settings -> Threaded mode`.
-
-> **Full reference:** See [docs/configuration.md](docs/configuration.md) and [`.env.example`](.env.example).
-
-### Finding Your Telegram User ID
-
-Message [@userinfobot](https://t.me/userinfobot) on Telegram -- it will reply with your user ID number.
+This adds the `platform` column to support multiple platforms.
 
 ## Troubleshooting
 
 **Bot doesn't respond:**
-- Check your `TELEGRAM_BOT_TOKEN` is correct
+- Check your `PLATFORM` setting
+- Verify platform credentials (token/app_id/app_secret)
 - Verify your user ID is in `ALLOWED_USERS`
 - Ensure Claude Code CLI is installed and accessible
 - Check bot logs with `make run-debug`
@@ -307,12 +306,17 @@ Message [@userinfobot](https://t.me/userinfobot) on Telegram -- it will reply wi
 **Claude integration not working:**
 - SDK mode (default): Check `claude auth status` or verify `ANTHROPIC_API_KEY`
 - CLI mode: Verify `claude --version` and `claude auth status`
-- Check `CLAUDE_ALLOWED_TOOLS` includes necessary tools (see [docs/tools.md](docs/tools.md) for the full reference)
+- Check `CLAUDE_ALLOWED_TOOLS` includes necessary tools
 
-**High usage costs:**
-- Adjust `CLAUDE_MAX_COST_PER_USER` to set spending limits
-- Monitor usage with `/status`
-- Use shorter, more focused requests
+**Platform-specific issues:**
+
+Telegram:
+- Webhook not receiving: Check webhook URL and secret
+- Commands not working: Use `/start` to refresh command menu
+
+Lark/Feishu:
+- Events not received: Verify event subscription in Open Platform
+- Permissions denied: Check app permissions include `im:message`
 
 ## Security
 
@@ -322,7 +326,7 @@ This bot implements defense-in-depth security:
 - **Directory Isolation** -- Sandboxing to approved directories
 - **Rate Limiting** -- Request and cost-based limits
 - **Input Validation** -- Injection and path traversal protection
-- **Webhook Authentication** -- GitHub HMAC-SHA256 and Bearer token verification
+- **Webhook Authentication** -- Platform-specific verification (Telegram HMAC-SHA256, Lark signatures)
 - **Audit Logging** -- Complete tracking of all user actions
 
 See [SECURITY.md](SECURITY.md) for details.
@@ -337,21 +341,36 @@ make format        # Auto-format code
 make run-debug     # Run with debug logging
 ```
 
-> **Full documentation:** See the [docs index](docs/README.md) for all guides and references.
+### Architecture
 
-### Version Management
+The bot uses a platform-agnostic architecture:
 
-The version is defined once in `pyproject.toml` and read at runtime via `importlib.metadata`. To cut a release:
-
-```bash
-make bump-patch    # 1.2.0 -> 1.2.1 (bug fixes)
-make bump-minor    # 1.2.0 -> 1.3.0 (new features)
-make bump-major    # 1.2.0 -> 2.0.0 (breaking changes)
+```
+┌─────────────────────────────────────────┐
+│         Business Logic Layer           │
+│  (Claude, Sessions, Security, Storage) │
+└──────────────┬──────────────────────────┘
+               │
+               │ Platform Adapter Interface
+               ↓
+┌─────────────────────────────────────────┐
+│       Platform Adapter Layer            │
+│  ┌──────────────┐  ┌──────────────┐    │
+│  │  Telegram    │  │  Lark/Feishu │    │
+│  │  Adapter     │  │  Adapter     │    │
+│  └──────────────┘  └──────────────┘    │
+└─────────────────────────────────────────┘
 ```
 
-Each command commits, tags, and pushes automatically, triggering CI tests and a GitHub Release with auto-generated notes.
+This design allows:
+- Easy addition of new platforms
+- Shared business logic across platforms
+- Platform-specific optimizations
+- Independent platform evolution
 
-### Contributing
+See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
+
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/amazing-feature`
@@ -364,11 +383,12 @@ Each command commits, tags, and pushes automatically, triggering CI tests and a 
 
 MIT License -- see [LICENSE](LICENSE).
 
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=RichardAtCT/claude-code-telegram&type=Date)](https://star-history.com/#RichardAtCT/claude-code-telegram&Date)
-
 ## Acknowledgments
 
 - [Claude](https://claude.ai) by Anthropic
 - [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)
+- [lark-oapi](https://github.com/larksuite-oapi/lark-oapi-python) - Official Lark/Feishu SDK
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=yourusername/claude-code-lark&type=Date)](https://star-history.com/#yourusername/claude-code-lark&Date)

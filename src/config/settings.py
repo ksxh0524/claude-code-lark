@@ -33,11 +33,35 @@ from src.utils.constants import (
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    # Bot settings
-    telegram_bot_token: SecretStr = Field(
-        ..., description="Telegram bot token from BotFather"
+    # Platform settings
+    platform: Literal["telegram", "lark"] = Field(
+        "telegram", description="Platform to use: 'telegram' or 'lark'"
     )
-    telegram_bot_username: str = Field(..., description="Bot username without @")
+
+    # Telegram settings (required if platform=telegram)
+    telegram_bot_token: Optional[SecretStr] = Field(
+        None, description="Telegram bot token from BotFather"
+    )
+    telegram_bot_username: Optional[str] = Field(
+        None, description="Bot username without @"
+    )
+
+    # Lark/Feishu settings (required if platform=lark)
+    lark_app_id: Optional[SecretStr] = Field(
+        None, description="Lark app ID (cli_xxxxxxxxx)"
+    )
+    lark_app_secret: Optional[SecretStr] = Field(
+        None, description="Lark app secret"
+    )
+    lark_encrypt_key: Optional[SecretStr] = Field(
+        None, description="Lark encryption key (optional)"
+    )
+    lark_verification_token: Optional[SecretStr] = Field(
+        None, description="Lark verification token (optional)"
+    )
+    lark_webhook_url: Optional[str] = Field(
+        None, description="Lark webhook URL for receiving events"
+    )
 
     # Security
     approved_directory: Path = Field(..., description="Base directory for projects")
@@ -450,6 +474,18 @@ class Settings(BaseSettings):
                     "projects_config_path required when enable_project_threads is True"
                 )
 
+        # Check platform-specific requirements
+        if self.platform == "telegram":
+            if not self.telegram_bot_token or not self.telegram_bot_username:
+                raise ValueError(
+                    "telegram_bot_token and telegram_bot_username required when platform=telegram"
+                )
+        elif self.platform == "lark":
+            if not self.lark_app_id or not self.lark_app_secret:
+                raise ValueError(
+                    "lark_app_id and lark_app_secret required when platform=lark"
+                )
+
         return self
 
     @property
@@ -466,9 +502,37 @@ class Settings(BaseSettings):
         return None
 
     @property
-    def telegram_token_str(self) -> str:
+    def telegram_token_str(self) -> Optional[str]:
         """Get Telegram token as string."""
-        return self.telegram_bot_token.get_secret_value()
+        return (
+            self.telegram_bot_token.get_secret_value()
+            if self.telegram_bot_token
+            else None
+        )
+
+    @property
+    def lark_app_id_str(self) -> Optional[str]:
+        """Get Lark app ID as string."""
+        return self.lark_app_id.get_secret_value() if self.lark_app_id else None
+
+    @property
+    def lark_app_secret_str(self) -> Optional[str]:
+        """Get Lark app secret as string."""
+        return self.lark_app_secret.get_secret_value() if self.lark_app_secret else None
+
+    @property
+    def lark_encrypt_key_str(self) -> Optional[str]:
+        """Get Lark encrypt key as string."""
+        return self.lark_encrypt_key.get_secret_value() if self.lark_encrypt_key else None
+
+    @property
+    def lark_verification_token_str(self) -> Optional[str]:
+        """Get Lark verification token as string."""
+        return (
+            self.lark_verification_token.get_secret_value()
+            if self.lark_verification_token
+            else None
+        )
 
     @property
     def auth_secret_str(self) -> Optional[str]:
