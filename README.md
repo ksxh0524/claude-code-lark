@@ -1,403 +1,236 @@
-# Claude Code Multi-Platform Bot
+# Claude Code Lark Bot
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-A multi-platform bot that gives you remote access to [Claude Code](https://claude.ai/code). Chat naturally with Claude about your projects from anywhere -- no terminal commands needed.
+飞书/Lark 机器人，让你通过聊天远程使用 [Claude Code](https://claude.ai/code)。随时随地与 Claude 讨论你的代码项目——无需终端命令。
 
-## 🌍 Supported Platforms
+> 📝 **Fork 自 [claude-code-telegram](https://github.com/nickg/claude-code-telegram)**，适配飞书/Lark 平台。
 
-- **Telegram** - The world's most secure messaging platform
-- **Lark/Feishu** - Enterprise collaboration platform (飞书)
+## ✨ 功能特性
 
-## What is this?
+- 🤖 **自然对话** - 用自然语言让 Claude 分析、编辑、解释代码
+- 🔄 **流式卡片** - 实时显示 Claude 处理进度和内容
+- ⏱️ **计时器** - 显示处理耗时
+- ⏹️ **中断按钮** - 随时停止长时间运行的任务
+- 💾 **会话持久化** - 自动保存每个项目的对话上下文
+- 🔒 **安全隔离** - 目录沙箱、用户白名单、审计日志
+- 📁 **文件处理** - 支持文件上传、图片分析
+- 🌐 **多平台** - 飞书/Lark (主要) + Telegram (可选)
 
-This bot connects your favorite messaging platform to Claude Code, providing a conversational AI interface for your codebase:
-
-- **Chat naturally** -- ask Claude to analyze, edit, or explain your code in plain language
-- **Maintain context** across conversations with automatic session persistence per project
-- **Code on the go** from any device with your messaging app
-- **Receive proactive notifications** from webhooks, scheduled jobs, and CI/CD events
-- **Stay secure** with built-in authentication, directory sandboxing, and audit logging
-- **Multi-platform** -- switch between Telegram and Lark seamlessly
-
-## Quick Start
-
-### Demo
+## 📸 效果展示
 
 ```
-You: Can you help me add error handling to src/api.py?
+你: 帮我在 src/api.py 添加错误处理
 
-Bot: I'll analyze src/api.py and add error handling...
-     [Claude reads your code, suggests improvements, and can apply changes directly]
+Bot: ⏱ 处理中... 3s
+     📖 Read: src/api.py
+     💬 我来分析代码并添加错误处理...
+     ✏️ Edit: src/api.py
 
-You: Looks good. Now run the tests to make sure nothing broke.
+Bot: ✅ 完成 · 8.2s
 
-Bot: Running pytest...
-     All 47 tests passed. The error handling changes are working correctly.
+     已添加 try-except 错误处理...
 ```
 
-### 1. Prerequisites
+## 🚀 快速开始
 
-- **Python 3.11+** -- [Download here](https://www.python.org/downloads/)
-- **Claude Code CLI** -- [Install from here](https://claude.ai/code)
-- **Platform credentials**:
-  - **Telegram**: Bot token from [@BotFather](https://t.me/botfather)
-  - **Lark/Feishu**: App credentials from [Open Platform](https://open.feishu.cn/)
+### 1. 前置要求
 
-### 2. Install
+- **Python 3.11+**
+- **Claude Code CLI** - [安装指南](https://claude.ai/code)
+- **飞书/Lark 应用** - 从 [开放平台](https://open.feishu.cn/) 创建
+
+### 2. 安装
 
 ```bash
-git clone https://github.com/yourusername/claude-code-lark.git
+git clone https://github.com/ksxh0524/claude-code-lark.git
 cd claude-code-lark
-make dev  # requires Poetry
+make dev  # 需要 Poetry
 ```
 
-### 3. Configure
+### 3. 配置
 
 ```bash
 cp .env.example .env
-# Edit .env with your settings:
 ```
 
-**Minimum required:**
+编辑 `.env`:
 
 ```bash
-# Choose your platform
-PLATFORM=telegram  # or 'lark'
+# 平台选择
+PLATFORM=lark
 
-# Telegram (if PLATFORM=telegram)
-TELEGRAM_BOT_TOKEN=1234567890:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-TELEGRAM_BOT_USERNAME=my_claude_bot
-
-# Lark/Feishu (if PLATFORM=lark)
+# 飞书应用凭证
 LARK_APP_ID=cli_xxxxxxxxx
 LARK_APP_SECRET=xxxxxxxxx
 
-# Common settings
+# 安全设置
 APPROVED_DIRECTORY=/Users/yourname/projects
-ALLOWED_USERS=123456789  # Your user ID
+ALLOWED_USERS=ou_xxxxxxxxx  # 你的 open_id
 ```
 
-### 4. Run
+### 4. 运行
 
 ```bash
-make run          # Production
-make run-debug    # With debug logging
+make run          # 生产模式
+make run-debug    # 调试模式
 ```
 
-Message your bot on your chosen platform to get started.
+## 📱 飞书/Lark 配置
 
-## Platform Setup Guides
+### 创建应用
 
-### Telegram Setup
+1. 访问 [飞书开放平台](https://open.feishu.cn/app) 或 [Lark 开放平台](https://open.larksuite.com/app)
+2. 创建企业自建应用
+3. 复制 **App ID** 和 **App Secret**
 
-1. Create a bot on Telegram:
-   - Message [@BotFather](https://t.me/botfather)
-   - Send `/newbot`
-   - Follow instructions to create your bot
-   - Copy the bot token
+### 配置权限
 
-2. Get your Telegram User ID:
-   - Message [@userinfobot](https://t.me/userinfobot)
-   - Copy your user ID
+在「权限管理」中添加：
 
-3. Configure `.env`:
-   ```bash
-   PLATFORM=telegram
-   TELEGRAM_BOT_TOKEN=your_token
-   TELEGRAM_BOT_USERNAME=your_bot_username
-   ALLOWED_USERS=your_user_id
-   ```
+| 权限 | 说明 |
+|------|------|
+| `im:message` | 获取与发送消息 |
+| `im:message:receive_as_bot` | 接收机器人消息 |
+| `im:message:group_at_msg` | 群聊 @ 机器人 |
+| `im:chat` | 获取群组信息 |
+| `contact:user.base:readonly` | 获取用户信息 |
+| `cardkit:card` | 创建和更新卡片 |
 
-### Lark/Feishu Setup
+### 配置事件
 
-1. Create a Lark/Feishu app:
-   - Visit [Open Platform](https://open.feishu.cn/app) (Feishu) or [https://open.larksuite.com/app](https://open.larksuite.com/app) (Lark)
-   - Click "Create App" → "Create App"
-   - Select "Enterprise Self-Built App" (企业自建应用)
-   - Copy App ID and App Secret
+在「事件订阅」中：
+- 订阅 `im.message.receive_v1` (接收消息)
+- 启用「卡片操作触发」事件 (按钮回调)
 
-2. Configure permissions:
-   - Go to "Permissions & Scopes"
-   - Add these scopes:
-     - `im:message` - Send and receive messages
-     - `im:message:receive_as_bot` - Receive messages as bot
-     - `im:message:group_at_msg` - Group messages with @mentions
-     - `im:chat` - Access chat information
-     - `contact:user.base:readonly` - Read user information
-     - `cardkit:card` - Create and update interactive cards
+### 获取 User ID
 
-3. Configure events (WebSocket mode):
-   - Go to "Events" → "Add Event"
-   - Subscribe to: `im.message.receive_v1`
-   - Enable "Card Action Trigger" event for button callbacks
+与机器人对话后，在日志中查看你的 `open_id`，添加到 `ALLOWED_USERS`。
 
-4. Configure bot:
-   - Go to "Bot Configuration"
-   - Enable the bot
-   - Set a name and avatar
+## 🎮 使用方式
 
-5. Get your credentials:
-   - Copy `App ID` and `App Secret` from the app page
-   - (Optional) Generate `Encrypt Key` and `Verification Token` for webhooks
+### Agentic 模式 (默认)
 
-6. Configure `.env`:
-   ```bash
-   PLATFORM=lark
-   LARK_APP_ID=cli_xxxxxxxxx
-   LARK_APP_SECRET=xxxxxxxxx
-   ALLOWED_USERS=your_open_id
-   ```
-
-**Note:** The bot uses WebSocket long polling by default for real-time message reception without requiring a public webhook endpoint.
-
-See [LARK_SETUP.md](docs/LARK_SETUP.md) for detailed Feishu setup instructions.
-
-## Modes
-
-The bot supports two interaction modes:
-
-### Agentic Mode (Default)
-
-The default conversational mode. Just talk to Claude naturally -- no special commands required.
-
-**Commands:** `/start`, `/new`, `/status`, `/verbose`, `/repo`
+直接对话，无需命令：
 
 ```
-You: What files are in this project?
-Bot: Working... (3s)
-     📖 Read
-     📂 LS
-     💬 Let me describe the project structure
-Bot: [Claude describes the project structure]
+你: 这个项目有哪些文件？
+Bot: [Claude 分析项目结构]
 
-You: Add a retry decorator to the HTTP client
-Bot: Working... (8s)
-     📖 Read: http_client.py
-     💬 I'll add a retry decorator with exponential backoff
-     ✏️ Edit: http_client.py
-     💻 Bash: poetry run pytest tests/ -v
-Bot: [Claude shows the changes and test results]
+你: 帮我重构 http_client.py
+Bot: [Claude 读取、分析、修改代码]
 ```
 
-### Classic Mode
+### 可用命令
 
-Set `AGENTIC_MODE=false` to enable the full 13-command terminal-like interface.
+| 命令 | 说明 |
+|------|------|
+| `/start` | 开始使用 |
+| `/new` | 开始新会话 |
+| `/status` | 查看状态 |
+| `/verbose [0\|1\|2]` | 设置详细程度 |
+| `/repo [name]` | 列出/切换项目 |
+| `/ls` | 列出文件 |
+| `/cd <dir>` | 切换目录 |
+| `/pwd` | 显示当前目录 |
+| `/projects` | 显示所有项目 |
+| `/export` | 导出会话 |
+| `/actions` | 快速操作 |
+| `/git` | Git 命令 |
+| `/list` | 显示命令列表 |
+| `/help` | 显示帮助 |
 
-**Commands:** `/start`, `/help`, `/new`, `/continue`, `/end`, `/status`, `/cd`, `/ls`, `/pwd`, `/projects`, `/export`, `/actions`, `/git`
+## ⚙️ 配置选项
 
-```
-You: /cd my-web-app
-Bot: Directory changed to my-web-app/
-
-You: /ls
-Bot: src/  tests/  package.json  README.md
-
-You: /actions
-Bot: [Run Tests] [Install Deps] [Format Code] [Run Linter]
-```
-
-## Event-Driven Automation
-
-Beyond direct chat, the bot can respond to external triggers:
-
-- **Webhooks** -- Receive events and route them through Claude for automated summaries or code review
-- **Scheduler** -- Run recurring Claude tasks on a cron schedule (e.g., daily code health checks)
-- **Notifications** -- Deliver agent responses to configured chats
-
-Enable with `ENABLE_API_SERVER=true` and `ENABLE_SCHEDULER=true`.
-
-## Features
-
-### Working Features
-
-- ✅ **Multi-platform support** - Telegram and Lark/Feishu
-- ✅ Conversational agentic mode with natural language interaction
-- ✅ Classic terminal-like mode with 13 commands
-- ✅ Full Claude Code integration with SDK
-- ✅ Automatic session persistence per user/project directory
-- ✅ Multi-layer authentication (whitelist + optional token-based)
-- ✅ Rate limiting with token bucket algorithm
-- ✅ Directory sandboxing with path traversal prevention
-- ✅ File upload handling with archive extraction
-- ✅ Image/screenshot upload with analysis
-- ✅ Voice message transcription (Mistral Voxtral / OpenAI Whisper)
-- ✅ Git integration with safe repository operations
-- ✅ Quick actions system with context-aware buttons
-- ✅ Session export in Markdown, HTML, and JSON formats
-- ✅ SQLite persistence with migrations
-- ✅ Usage and cost tracking
-- ✅ Audit logging and security event tracking
-- ✅ Event bus for decoupled message routing
-- ✅ Webhook API server
-- ✅ Job scheduler with cron expressions
-- ✅ Notification service with per-chat rate limiting
-- ✅ Platform-agnostic architecture for easy extension
-
-### Platform-Specific Features
-
-#### Telegram
-- Inline keyboards for interactive buttons
-- Bot command menu
-- Message threading and topics
-- HTML message formatting
-- Typing indicators
-
-#### Lark/Feishu
-- Interactive card messages with CardKit 2.0
-- **Streaming cards** with real-time content updates
-- **Stop button** for interrupting long-running requests
-- **Live timer** showing processing time in subtitle
-- Loading indicators with animated icons
-- Quick actions
-- Rich text with Markdown
-- Button interactions
-- Threaded conversations
-
-## Configuration
-
-### Required
+### 必需配置
 
 ```bash
-# Platform selection
-PLATFORM=telegram  # or 'lark'
-
-# Platform credentials (depends on PLATFORM)
-TELEGRAM_BOT_TOKEN=...  # Telegram only
-TELEGRAM_BOT_USERNAME=...  # Telegram only
-LARK_APP_ID=...  # Lark only
-LARK_APP_SECRET=...  # Lark only
-
-# Common settings
-APPROVED_DIRECTORY=...  # Base directory for project access
-ALLOWED_USERS=...  # Comma-separated user IDs
+PLATFORM=lark
+LARK_APP_ID=cli_xxxxxxxxx
+LARK_APP_SECRET=xxxxxxxxx
+APPROVED_DIRECTORY=/path/to/projects
+ALLOWED_USERS=ou_xxxxxxxxx
 ```
 
-### Common Options
+### 可选配置
 
 ```bash
 # Claude
-ANTHROPIC_API_KEY=sk-ant-...  # API key (optional if using CLI auth)
-CLAUDE_MAX_COST_PER_USER=10.0  # Spending limit per user (USD)
-CLAUDE_TIMEOUT_SECONDS=300  # Operation timeout
+ANTHROPIC_API_KEY=sk-ant-...  # API 密钥 (可选，默认使用 CLI 认证)
+CLAUDE_MAX_COST_PER_USER=10.0  # 每用户费用限制 (USD)
+CLAUDE_TIMEOUT_SECONDS=300     # 操作超时时间
 
-# Mode
-AGENTIC_MODE=true  # Agentic (default) or classic mode
-VERBOSE_LEVEL=1  # 0=quiet, 1=normal, 2=detailed
+# 模式
+AGENTIC_MODE=true   # Agentic 模式 (默认)
+VERBOSE_LEVEL=1     # 0=静默, 1=正常, 2=详细
 
-# Rate Limiting
-RATE_LIMIT_REQUESTS=10  # Requests per window
-RATE_LIMIT_WINDOW=60  # Window in seconds
+# 速率限制
+RATE_LIMIT_REQUESTS=10  # 每窗口请求数
+RATE_LIMIT_WINDOW=60    # 窗口秒数
 ```
 
-See [docs/configuration.md](docs/configuration.md) for full reference.
+## 🔧 故障排除
 
-## Database Migration
+**机器人无响应：**
+- 检查 `PLATFORM=lark` 设置
+- 验证 `LARK_APP_ID` 和 `LARK_APP_SECRET`
+- 确认你的 `open_id` 在 `ALLOWED_USERS` 中
+- 检查 Claude Code CLI 是否安装
+- 查看日志 `make run-debug`
 
-When upgrading from a single-platform version, run the database migration:
+**Claude 集成问题：**
+- 运行 `claude auth status` 检查认证状态
+- 或设置 `ANTHROPIC_API_KEY`
 
-```bash
-python scripts/migrations/add_platform_support.py migrate
-```
+**卡片更新失败：**
+- 确认已添加 `cardkit:card` 权限
+- 检查事件订阅是否正确配置
 
-This adds the `platform` column to support multiple platforms.
-
-## Troubleshooting
-
-**Bot doesn't respond:**
-- Check your `PLATFORM` setting
-- Verify platform credentials (token/app_id/app_secret)
-- Verify your user ID is in `ALLOWED_USERS`
-- Ensure Claude Code CLI is installed and accessible
-- Check bot logs with `make run-debug`
-
-**Claude integration not working:**
-- SDK mode (default): Check `claude auth status` or verify `ANTHROPIC_API_KEY`
-- CLI mode: Verify `claude --version` and `claude auth status`
-- Check `CLAUDE_ALLOWED_TOOLS` includes necessary tools
-
-**Platform-specific issues:**
-
-Telegram:
-- Webhook not receiving: Check webhook URL and secret
-- Commands not working: Use `/start` to refresh command menu
-
-Lark/Feishu:
-- Events not received: Verify event subscription in Open Platform
-- Permissions denied: Check app permissions include `im:message`
-
-## Security
-
-This bot implements defense-in-depth security:
-
-- **Access Control** -- Whitelist-based user authentication
-- **Directory Isolation** -- Sandboxing to approved directories
-- **Rate Limiting** -- Request and cost-based limits
-- **Input Validation** -- Injection and path traversal protection
-- **Webhook Authentication** -- Platform-specific verification (Telegram HMAC-SHA256, Lark signatures)
-- **Audit Logging** -- Complete tracking of all user actions
-
-See [SECURITY.md](SECURITY.md) for details.
-
-## Development
-
-```bash
-make dev           # Install all dependencies
-make test          # Run tests with coverage
-make lint          # Black + isort + flake8 + mypy
-make format        # Auto-format code
-make run-debug     # Run with debug logging
-```
-
-### Architecture
-
-The bot uses a platform-agnostic architecture:
+## 📁 项目结构
 
 ```
-┌─────────────────────────────────────────┐
-│         Business Logic Layer           │
-│  (Claude, Sessions, Security, Storage) │
-└──────────────┬──────────────────────────┘
-               │
-               │ Platform Adapter Interface
-               ↓
-┌─────────────────────────────────────────┐
-│       Platform Adapter Layer            │
-│  ┌──────────────┐  ┌──────────────┐    │
-│  │  Telegram    │  │  Lark/Feishu │    │
-│  │  Adapter     │  │  Adapter     │    │
-│  └──────────────┘  └──────────────┘    │
-└─────────────────────────────────────────┘
+src/
+├── bot/
+│   ├── adapters/          # 平台适配器
+│   │   ├── lark.py        # 飞书/Lark 适配器
+│   │   └── telegram.py    # Telegram 适配器
+│   ├── core_engine.py     # 核心引擎
+│   └── orchestrator.py    # 消息编排
+├── claude/                # Claude 集成
+│   ├── facade.py          # 门面层
+│   └── sdk_integration.py # SDK 集成
+├── storage/               # 存储层
+└── security/              # 安全模块
 ```
 
-This design allows:
-- Easy addition of new platforms
-- Shared business logic across platforms
-- Platform-specific optimizations
-- Independent platform evolution
+## 🛡️ 安全特性
 
-See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
+- **用户白名单** - 只允许授权用户访问
+- **目录沙箱** - 限制在批准的目录内操作
+- **速率限制** - 防止滥用
+- **输入验证** - 防止注入攻击
+- **审计日志** - 完整的操作记录
 
-## Contributing
+## 📄 文档
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/amazing-feature`
-3. Make changes with tests: `make test && make lint`
-4. Submit a Pull Request
+- [飞书配置详解](docs/LARK_SETUP.md)
+- [配置参考](docs/configuration.md)
+- [开发指南](docs/development.md)
 
-**Code standards:** Python 3.11+, Black formatting (88 chars), type hints required, pytest with >85% coverage.
+## 🤝 贡献
 
-## License
+1. Fork 本仓库
+2. 创建分支: `git checkout -b feature/amazing-feature`
+3. 提交更改: `make test && make lint`
+4. 提交 Pull Request
 
-MIT License -- see [LICENSE](LICENSE).
+## 📜 许可证
 
-## Acknowledgments
+MIT License - 详见 [LICENSE](LICENSE)
+
+## 🙏 致谢
 
 - [Claude](https://claude.ai) by Anthropic
-- [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)
-- [lark-oapi](https://github.com/larksuite-oapi/lark-oapi-python) - Official Lark/Feishu SDK
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=yourusername/claude-code-lark&type=Date)](https://star-history.com/#yourusername/claude-code-lark&Date)
+- [claude-code-telegram](https://github.com/nickg/claude-code-telegram) - 原始 Telegram 版本
+- [lark-oapi-python](https://github.com/larksuite-oapi/lark-oapi-python) - 飞书官方 SDK

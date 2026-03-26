@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (Lark/飞书版本)
+- **Lark/飞书平台支持**: 完整适配飞书/Lark 平台，支持 WebSocket 长连接模式
+- **流式卡片**: 实时显示 Claude 处理进度，使用 CardKit 2.0 API
+- **中断按钮**: Stop 按钮可中断长时间运行的请求
+- **计时器显示**: 实时显示处理耗时 (如 "⏱ 处理中... 5s" → "✅ 完成 · 31.0s")
+- **所有消息转卡片**: 自动将文本消息转换为交互式卡片格式
+- **Agentic 模式增强**: 添加 utility 命令 (ls, cd, pwd, projects, export, actions, git, list, help)
+- **中文状态提示**: 使用中文显示状态信息 (处理中、完成、已中断、出错)
+
+### Changed (Lark/飞书版本)
+- 默认平台从 Telegram 改为 Lark (`PLATFORM=lark`)
+- 项目定位为飞书/Lark 版本 (fork 自 claude-code-telegram)
+- 更新 README 以飞书/Lark 为主要平台
+
 ## [1.5.0] - 2026-03-04
 
 ### Added
