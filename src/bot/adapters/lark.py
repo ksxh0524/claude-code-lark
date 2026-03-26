@@ -322,18 +322,20 @@ class LarkAdapter(PlatformAdapter):
         # Track content and update state
         full_content = [""]
         update_sequence = [0]
+        timer_sequence = [0]  # Separate sequence for timer updates
         last_update_time = [0.0]  # Track last update time for throttling
         timer_running = [True]  # Control timer task
 
         # Wait briefly for card to be ready before first update
         await asyncio.sleep(0.2)
 
-        # Timer task - updates subtitle with elapsed time every second
+        # Timer task - updates timer element with elapsed time every second
         async def timer_task():
             try:
                 while timer_running[0] and not interrupt_event.is_set():
                     elapsed = time.time() - start_time
-                    await self._update_card_subtitle(card_id, f"处理中... {elapsed:.0f}s")
+                    await self._update_card_timer(card_id, f"⏱ 处理中... {elapsed:.0f}s", timer_sequence[0])
+                    timer_sequence[0] += 1
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 pass
@@ -396,8 +398,9 @@ class LarkAdapter(PlatformAdapter):
 
             logger.info("Final response", content_len=len(final_text), response_len=len(response.content or ""))
 
-            # Final update with status in subtitle
-            await self._update_card_subtitle(card_id, f"{status} · {elapsed:.1f}s")
+            # Final update with status in timer element
+            await self._update_card_timer(card_id, f"✅ {status} · {elapsed:.1f}s", timer_sequence[0])
+            timer_sequence[0] += 1
             final_content = final_text
             await self._update_card_content(card_id, final_content, update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
@@ -406,7 +409,7 @@ class LarkAdapter(PlatformAdapter):
             timer_running[0] = False
             timer_task_handle.cancel()
             elapsed = time.time() - start_time
-            await self._update_card_subtitle(card_id, f"已取消 · {elapsed:.1f}s")
+            await self._update_card_timer(card_id, f"❌ 已取消 · {elapsed:.1f}s", timer_sequence[0])
             await self._update_card_content(card_id, "请求已取消", update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
@@ -415,7 +418,7 @@ class LarkAdapter(PlatformAdapter):
             timer_task_handle.cancel()
             logger.error("Error", error=str(e), exc_info=True)
             elapsed = time.time() - start_time
-            await self._update_card_subtitle(card_id, f"出错 · {elapsed:.1f}s")
+            await self._update_card_timer(card_id, f"❌ 出错 · {elapsed:.1f}s", timer_sequence[0])
             await self._update_card_content(card_id, str(e), update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
@@ -465,6 +468,13 @@ class LarkAdapter(PlatformAdapter):
                 },
                 "body": {
                     "elements": [
+                        # Timer element showing elapsed time
+                        {
+                            "tag": "markdown",
+                            "content": "⏱ 处理中... 0s",
+                            "element_id": "timer_element",
+                            "text_size": "notation"
+                        },
                         # Main content element for streaming updates
                         {
                             "tag": "markdown",
@@ -577,6 +587,37 @@ class LarkAdapter(PlatformAdapter):
             logger.error("Error updating card content", error=str(e))
             return False
 
+    async def _update_card_timer(self, card_id: str, timer_text: str, sequence: int) -> bool:
+        """Update timer element via streaming API.
+
+        Uses the same card_element.content API as content updates,
+        but targets the timer_element instead of content_element.
+        """
+        try:
+            update_request = ContentCardElementRequest.builder() \
+                .card_id(card_id) \
+                .element_id("timer_element") \
+                .request_body(
+                    ContentCardElementRequestBody.builder()
+                        .content(timer_text)
+                        .uuid(str(uuid.uuid4()))
+                        .sequence(sequence)
+                        .build()
+                ).build()
+
+            response = await self._execute_async(
+                self.client.cardkit.v1.card_element.content, update_request
+            )
+
+            if response.code != 0:
+                logger.warning("Timer update failed", code=response.code)
+                return False
+            return True
+
+        except Exception as e:
+            logger.error("Error updating timer", error=str(e))
+            return False
+
     async def _update_card_subtitle(self, card_id: str, subtitle: str) -> bool:
         """Update card header subtitle via cardkit API.
 
@@ -622,22 +663,25 @@ class LarkAdapter(PlatformAdapter):
             return False
 
     async def _close_streaming_mode(self, card_id: str, sequence: int) -> bool:
-        """Close streaming mode and remove the stop button and loading icon."""
+        """Close streaming mode and remove the stop button and timer element."""
         try:
-            # First, delete the loading icon element
-            await self._delete_card_element(card_id, "loading_icon", sequence)
+            # First, delete the timer element
+            await self._delete_card_element(card_id, "timer_element", sequence)
+
+            # Then, delete the loading icon element
+            await self._delete_card_element(card_id, "loading_icon", sequence + 1)
 
             # Then, delete the stop button element
-            await self._delete_card_element(card_id, "stop_button", sequence + 1)
+            await self._delete_card_element(card_id, "stop_button", sequence + 2)
 
-            # Finally close streaming mode (sequence + 2 for next operation)
+            # Finally close streaming mode (sequence + 3 for next operation)
             settings_request = SettingsCardRequest.builder() \
                 .card_id(card_id) \
                 .request_body(
                     SettingsCardRequestBody.builder()
                         .settings(json.dumps({"config": {"streaming_mode": False}}))
                         .uuid(str(uuid.uuid4()))
-                        .sequence(sequence + 2)
+                        .sequence(sequence + 3)
                         .build()
                 ).build()
 

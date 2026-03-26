@@ -122,13 +122,16 @@ Message your bot on your chosen platform to get started.
    - Go to "Permissions & Scopes"
    - Add these scopes:
      - `im:message` - Send and receive messages
-     - `im:message:group_at_msg` - Group messages
+     - `im:message:receive_as_bot` - Receive messages as bot
+     - `im:message:group_at_msg` - Group messages with @mentions
      - `im:chat` - Access chat information
      - `contact:user.base:readonly` - Read user information
+     - `cardkit:card` - Create and update interactive cards
 
-3. Configure events:
+3. Configure events (WebSocket mode):
    - Go to "Events" → "Add Event"
    - Subscribe to: `im.message.receive_v1`
+   - Enable "Card Action Trigger" event for button callbacks
 
 4. Configure bot:
    - Go to "Bot Configuration"
@@ -146,6 +149,8 @@ Message your bot on your chosen platform to get started.
    LARK_APP_SECRET=xxxxxxxxx
    ALLOWED_USERS=your_open_id
    ```
+
+**Note:** The bot uses WebSocket long polling by default for real-time message reception without requiring a public webhook endpoint.
 
 See [LARK_SETUP.md](docs/LARK_SETUP.md) for detailed Feishu setup instructions.
 
@@ -240,7 +245,11 @@ Enable with `ENABLE_API_SERVER=true` and `ENABLE_SCHEDULER=true`.
 - Typing indicators
 
 #### Lark/Feishu
-- Interactive card messages
+- Interactive card messages with CardKit 2.0
+- **Streaming cards** with real-time content updates
+- **Stop button** for interrupting long-running requests
+- **Live timer** showing processing time in subtitle
+- Loading indicators with animated icons
 - Quick actions
 - Rich text with Markdown
 - Button interactions
