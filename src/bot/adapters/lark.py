@@ -1238,27 +1238,68 @@ class LarkAdapter(PlatformAdapter):
         reply_to_message_id: Optional[str] = None,
         **kwargs: Any,
     ) -> PlatformResponse:
-        """Send text message to Lark chat."""
+        """Send text message to Lark chat as an interactive card.
+
+        All messages are converted to card format for better visual presentation.
+        """
         try:
-            # Build message request
-            content = {
-                "text": text
+            # Build card JSON from text
+            # Parse emoji icons from the beginning of the text
+            icon = "💬"
+            title = "消息"
+            content_text = text
+
+            # Extract emoji icon from the beginning
+            if text and len(text) > 2:
+                first_char = text[0]
+                if first_char in "👋🆕📊📁📄✅❌⚠️💡⚡💰📍🔧📤":
+                    icon = first_char
+                    # Find title (first line after icon)
+                    rest = text[1:].strip()
+                    if "\n" in rest:
+                        first_line_end = rest.find("\n")
+                        title = rest[:first_line_end].strip()
+                        content_text = rest[first_line_end + 1:].strip()
+                    else:
+                        title = rest[:50] if len(rest) > 50 else rest
+                        content_text = ""
+                else:
+                    content_text = text
+
+            # Build card
+            card = {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "title": {"content": f"{icon} {title}", "tag": "plain_text"},
+                    "template": self._get_card_template(icon)
+                },
+                "elements": []
             }
 
-            message_type = "text"
+            # Add content if exists
+            if content_text:
+                # Convert HTML to Lark markdown format
+                card_content = content_text.replace("<b>", "**").replace("</b>", "**")
+                card_content = card_content.replace("<code>", "`").replace("</code>", "`")
+                card["elements"].append({
+                    "tag": "markdown",
+                    "content": card_content
+                })
+            else:
+                # Just show title if no content
+                card["elements"].append({
+                    "tag": "markdown",
+                    "content": title
+                })
 
-            # Add reply if specified
-            if reply_to_message_id:
-                content["reply_in_thread"] = True
-
-            # Use chat_id as receive_id_type since we receive chat_id from events
+            # Send as interactive card
             request = CreateMessageRequest.builder() \
                 .receive_id_type("chat_id") \
                 .request_body(
                     CreateMessageRequestBody.builder()
                         .receive_id(chat_id)
-                        .msg_type(message_type)
-                        .content(json.dumps(content))
+                        .msg_type("interactive")
+                        .content(json.dumps(card))
                         .build()
                 ) \
                 .build()
@@ -1282,6 +1323,34 @@ class LarkAdapter(PlatformAdapter):
         except Exception as e:
             logger.error("Failed to send message", error=str(e))
             return PlatformResponse(success=False, error=str(e))
+
+    def _get_card_template(self, icon: str) -> str:
+        """Get card header template color based on message icon.
+
+        Args:
+            icon: Emoji icon from the message
+
+        Returns:
+            Template color string
+        """
+        template_map = {
+            "👋": "blue",      # Welcome
+            "🆕": "turquoise", # New
+            "📊": "purple",    # Status
+            "📁": "blue",      # Directory
+            "📄": "blue",      # File
+            "✅": "green",     # Success
+            "❌": "red",       # Error
+            "⚠️": "yellow",    # Warning
+            "💡": "wathet",    # Tip
+            "⚡": "indigo",    # Action
+            "💰": "orange",    # Cost
+            "📍": "blue",      # Location
+            "🔧": "blue",      # Settings
+            "📤": "turquoise", # Export
+            "💬": "blue",      # Message (default)
+        }
+        return template_map.get(icon, "blue")
 
     async def send_card(
         self,

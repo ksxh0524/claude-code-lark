@@ -2142,20 +2142,78 @@ class MessageOrchestrator:
                 return
 
             # List files
-            items = []
-            for item in sorted(work_path.iterdir(), key=lambda x: (not x.is_dir(), x.name)):
+            dirs = []
+            files = []
+            for item in sorted(work_path.iterdir(), key=lambda x: x.name.lower()):
                 if item.name.startswith("."):
                     continue
-                icon = "📁" if item.is_dir() else "📄"
-                items.append(f"{icon} <code>{item.name}</code>")
+                if item.is_dir():
+                    dirs.append(item.name)
+                else:
+                    files.append(item.name)
 
-            if items:
-                msg = f"📁 <b>{work_path.name}</b>\n\n" + "\n".join(items[:50])
-                if len(items) > 50:
-                    msg += f"\n\n... 还有 {len(items) - 50} 项"
+            total_items = len(dirs) + len(files)
+
+            # Check if adapter supports cards (Lark)
+            if hasattr(adapter, 'platform_name') and adapter.platform_name == 'lark':
+                # Build Lark card for file listing
+                card_elements = []
+
+                # Directory section
+                if dirs:
+                    dir_items = dirs[:30]
+                    dir_content = "\n".join([f"📁 `{name}`" for name in dir_items])
+                    if len(dirs) > 30:
+                        dir_content += f"\n\n_... 还有 {len(dirs) - 30} 个文件夹_"
+                    card_elements.append({
+                        "tag": "div",
+                        "text": {"content": f"**文件夹 ({len(dirs)})**\n{dir_content}", "tag": "lark_md"}
+                    })
+
+                # Files section
+                if files:
+                    file_items = files[:30]
+                    file_content = "\n".join([f"📄 `{name}`" for name in file_items])
+                    if len(files) > 30:
+                        file_content += f"\n\n_... 还有 {len(files) - 30} 个文件_"
+                    card_elements.append({
+                        "tag": "div",
+                        "text": {"content": f"**文件 ({len(files)})**\n{file_content}", "tag": "lark_md"}
+                    })
+
+                if not dirs and not files:
+                    card_elements.append({
+                        "tag": "div",
+                        "text": {"content": "📁 目录为空", "tag": "lark_md"}
+                    })
+
+                card = {
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "title": {"content": f"📁 {work_path.name}", "tag": "plain_text"},
+                        "subtitle": {"content": f"{total_items} 项 · {work_dir}", "tag": "plain_text"},
+                        "template": "blue"
+                    },
+                    "elements": card_elements
+                }
+
+                await adapter.send_card(chat_id, card)
             else:
-                msg = "📁 目录为空"
-            await adapter.send_message(chat_id, msg)
+                # Fallback to text for other platforms
+                items = []
+                for name in dirs:
+                    items.append(f"📁 <code>{name}</code>")
+                for name in files:
+                    items.append(f"📄 <code>{name}</code>")
+
+                if items:
+                    msg = f"📁 <b>{work_path.name}</b>\n\n" + "\n".join(items[:50])
+                    if len(items) > 50:
+                        msg += f"\n\n... 还有 {len(items) - 50} 项"
+                else:
+                    msg = "📁 目录为空"
+                await adapter.send_message(chat_id, msg)
+
         except Exception as e:
             await adapter.send_message(chat_id, f"❌ 列出文件失败: {str(e)}")
 
