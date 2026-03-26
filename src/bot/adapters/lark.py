@@ -322,37 +322,36 @@ class LarkAdapter(PlatformAdapter):
         # Track content and update state
         full_content = [""]
         update_sequence = [0]
-        last_update_time = [0.0]
+        last_update_time = [0.0]  # Track last update time for throttling
 
-        # Heartbeat for real-time progress updates (every 1s)
-        async def update_heartbeat():
-            try:
-                while not interrupt_event.is_set():
-                    await asyncio.sleep(1.0)
-                    if interrupt_event.is_set():
-                        break
-                    elapsed = time.time() - start_time
-                    content = f"Working... ({elapsed:.0f}s)\n\n{full_content[0]}"
-                    await self._update_card_content(card_id, content, update_sequence[0])
-                    update_sequence[0] += 1
-            except asyncio.CancelledError:
-                pass
+        # Wait briefly for card to be ready before first update
+        await asyncio.sleep(0.2)
 
-        heartbeat_task = asyncio.create_task(update_heartbeat())
-
-        # Stream callback
+        # Stream callback - accumulates content with throttled updates
         async def on_stream(event: StreamEvent) -> None:
             if interrupt_event.is_set():
                 return
 
+            content_changed = False
             if event.type == "progress" and event.tool_name:
                 full_content[0] += f"[{event.tool_name}]\n"
+                content_changed = True
             elif event.type == "response" and event.content:
                 content = event.content
                 if not (content.startswith("[ThinkingBlock") or content.startswith("[ContentBlock")):
                     full_content[0] += content
+                    content_changed = True
             elif event.type == "error":
                 full_content[0] += f"\n[Error] {event.content}\n"
+                content_changed = True
+
+            # Throttle updates: at most every 150ms (like OpenClaw's CARDKIT_MS)
+            if content_changed:
+                now = time.time()
+                if now - last_update_time[0] >= 0.15:
+                    await self._update_card_content(card_id, full_content[0] or "Thinking...", update_sequence[0])
+                    update_sequence[0] += 1
+                    last_update_time[0] = now
 
         self._stop_callbacks[user_id] = interrupt_event
 
@@ -360,13 +359,6 @@ class LarkAdapter(PlatformAdapter):
             response = await self.core_engine.process_message(
                 ctx, on_stream, interrupt_event=interrupt_event
             )
-
-            # Signal heartbeat to stop and wait for it
-            interrupt_event.set()
-            try:
-                await asyncio.wait_for(heartbeat_task, timeout=2.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
 
             elapsed = time.time() - start_time
             status = "Done" if response.success else ("Interrupted" if response.interrupted else "Error")
@@ -378,21 +370,20 @@ class LarkAdapter(PlatformAdapter):
 
             logger.info("Final response", content_len=len(final_text), response_len=len(response.content or ""))
 
-            final_content = f"[{status}] {elapsed:.1f}s\n\n{final_text}"
+            # Final update with status and elapsed time (only shown at end)
+            final_content = f"**{status}** · {elapsed:.1f}s\n\n{final_text}"
             await self._update_card_content(card_id, final_content, update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
         except asyncio.CancelledError:
-            heartbeat_task.cancel()
             elapsed = time.time() - start_time
-            await self._update_card_content(card_id, f"[Cancelled] {elapsed:.1f}s\n\n请求已取消", update_sequence[0])
+            await self._update_card_content(card_id, f"**Cancelled** · {elapsed:.1f}s\n\n请求已取消", update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
         except Exception as e:
-            heartbeat_task.cancel()
             logger.error("Error", error=str(e), exc_info=True)
             elapsed = time.time() - start_time
-            await self._update_card_content(card_id, f"[Error] {elapsed:.1f}s\n\n{str(e)}", update_sequence[0])
+            await self._update_card_content(card_id, f"**Error** · {elapsed:.1f}s\n\n{str(e)}", update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
         finally:
@@ -402,6 +393,11 @@ class LarkAdapter(PlatformAdapter):
         self, chat_id: str, user_id: int = 0
     ) -> tuple[Optional[str], Optional[str]]:
         """Create streaming card with Stop button and send as message.
+
+        Follows OpenClaw's STREAMING_THINKING_CARD pattern:
+        - streaming_mode with summary for processing state
+        - loading icon element for visual feedback
+        - Stop button for interruption
 
         Args:
             chat_id: Chat ID to send card to
@@ -413,6 +409,7 @@ class LarkAdapter(PlatformAdapter):
         try:
             # Schema 2.0: button goes directly in elements, not in "action" container
             # Use behaviors with type "callback" for button click handling
+            # Pattern based on OpenClaw's STREAMING_THINKING_CARD
             card_json = {
                 "schema": "2.0",
                 "header": {
@@ -426,11 +423,35 @@ class LarkAdapter(PlatformAdapter):
                         "print_frequency_ms": {"default": 50},
                         "print_step": {"default": 2},
                         "print_strategy": "fast"
+                    },
+                    # Summary shown in notification/feed during processing
+                    "summary": {
+                        "content": "Processing...",
+                        "i18n_content": {"zh_cn": "处理中...", "en_us": "Processing..."}
                     }
                 },
                 "body": {
                     "elements": [
-                        {"tag": "markdown", "content": "Working...", "element_id": "content_element"},
+                        # Main content element for streaming updates
+                        {
+                            "tag": "markdown",
+                            "content": "Thinking...",
+                            "element_id": "content_element",
+                            "text_align": "left",
+                            "text_size": "normal_v2"
+                        },
+                        # Loading indicator (like OpenClaw's loading_icon)
+                        {
+                            "tag": "markdown",
+                            "content": " ",
+                            "icon": {
+                                "tag": "custom_icon",
+                                "img_key": "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg",
+                                "size": "16px 16px"
+                            },
+                            "element_id": "loading_icon"
+                        },
+                        # Stop button for interruption
                         {
                             "tag": "button",
                             "element_id": "stop_button",
@@ -515,28 +536,31 @@ class LarkAdapter(PlatformAdapter):
             )
 
             if response.code != 0:
-                logger.warning("Card update failed", code=response.code)
+                logger.warning("Card content update failed", code=response.code)
                 return False
             return True
 
         except Exception as e:
-            logger.error("Error updating card", error=str(e))
+            logger.error("Error updating card content", error=str(e))
             return False
 
     async def _close_streaming_mode(self, card_id: str, sequence: int) -> bool:
-        """Close streaming mode and remove the stop button."""
+        """Close streaming mode and remove the stop button and loading icon."""
         try:
-            # First, delete the stop button element (use current sequence)
-            await self._remove_stop_button(card_id, sequence)
+            # First, delete the loading icon element
+            await self._delete_card_element(card_id, "loading_icon", sequence)
 
-            # Then close streaming mode (sequence + 1 for next operation)
+            # Then, delete the stop button element
+            await self._delete_card_element(card_id, "stop_button", sequence + 1)
+
+            # Finally close streaming mode (sequence + 2 for next operation)
             settings_request = SettingsCardRequest.builder() \
                 .card_id(card_id) \
                 .request_body(
                     SettingsCardRequestBody.builder()
                         .settings(json.dumps({"config": {"streaming_mode": False}}))
                         .uuid(str(uuid.uuid4()))
-                        .sequence(sequence + 1)
+                        .sequence(sequence + 2)
                         .build()
                 ).build()
 
@@ -555,8 +579,8 @@ class LarkAdapter(PlatformAdapter):
             logger.error("Error closing streaming", error=str(e))
             return False
 
-    async def _remove_stop_button(self, card_id: str, sequence: int = 1) -> bool:
-        """Delete the stop button element using DELETE API with sequence."""
+    async def _delete_card_element(self, card_id: str, element_id: str, sequence: int) -> bool:
+        """Delete a card element using DELETE API with sequence."""
         try:
             from lark_oapi.api.cardkit.v1 import (
                 DeleteCardElementRequest,
@@ -565,7 +589,7 @@ class LarkAdapter(PlatformAdapter):
 
             delete_request = DeleteCardElementRequest.builder() \
                 .card_id(card_id) \
-                .element_id("stop_button") \
+                .element_id(element_id) \
                 .request_body(
                     DeleteCardElementRequestBody.builder()
                     .sequence(sequence)
@@ -577,15 +601,19 @@ class LarkAdapter(PlatformAdapter):
             )
 
             if response.code != 0:
-                logger.warning("Failed to delete stop button", code=response.code, msg=response.msg)
+                logger.warning("Failed to delete card element", code=response.code, element_id=element_id)
                 return False
 
-            logger.info("Deleted stop button", card_id=card_id, sequence=sequence)
+            logger.info("Deleted card element", card_id=card_id, element_id=element_id, sequence=sequence)
             return True
 
         except Exception as e:
-            logger.error("Error deleting stop button", error=str(e))
+            logger.error("Error deleting card element", error=str(e), element_id=element_id)
             return False
+
+    async def _remove_stop_button(self, card_id: str, sequence: int = 1) -> bool:
+        """Delete the stop button element using DELETE API with sequence."""
+        return await self._delete_card_element(card_id, "stop_button", sequence)
 
     async def _process_with_fallback(
         self,
