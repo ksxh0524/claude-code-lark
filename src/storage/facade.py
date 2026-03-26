@@ -45,6 +45,8 @@ class Storage:
         self.audit = AuditLogRepository(self.db_manager)
         self.costs = CostTrackingRepository(self.db_manager)
         self.analytics = AnalyticsRepository(self.db_manager)
+        # In-memory cache for user settings (persists during session, not across restarts)
+        self._user_settings_cache: Dict[int, Dict[str, Any]] = {}
 
     async def initialize(self):
         """Initialize storage system."""
@@ -330,3 +332,67 @@ class Storage:
             "total_costs": total_costs,
             "tool_stats": tool_stats,
         }
+
+    # --- User Settings Methods ---
+
+    async def get_user_setting(
+        self, user_id: int, key: str, default: Any = None
+    ) -> Any:
+        """Get a user setting value from cache.
+
+        Args:
+            user_id: User ID
+            key: Setting key
+            default: Default value if not found
+
+        Returns:
+            Setting value or default
+        """
+        if user_id not in self._user_settings_cache:
+            return default
+        return self._user_settings_cache[user_id].get(key, default)
+
+    async def set_user_setting(
+        self, user_id: int, key: str, value: Any
+    ) -> None:
+        """Set a user setting value in cache.
+
+        Args:
+            user_id: User ID
+            key: Setting key
+            value: Setting value
+        """
+        if user_id not in self._user_settings_cache:
+            self._user_settings_cache[user_id] = {}
+        self._user_settings_cache[user_id][key] = value
+
+        logger.debug(
+            "User setting cached",
+            user_id=user_id,
+            key=key,
+            value_type=type(value).__name__,
+        )
+
+    async def get_active_session(self, user_id: int) -> Optional[SessionModel]:
+        """Get user's most recent active session.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            Most recent active session or None
+        """
+        sessions = await self.sessions.get_user_sessions(user_id, active_only=True)
+        return sessions[0] if sessions else None
+
+    async def clear_user_session(self, user_id: int) -> None:
+        """Deactivate all sessions for a user.
+
+        Args:
+            user_id: User ID
+        """
+        sessions = await self.sessions.get_user_sessions(user_id, active_only=True)
+        for session in sessions:
+            session.is_active = False
+            await self.sessions.update_session(session)
+        logger.info("Cleared user sessions", user_id=user_id, count=len(sessions))

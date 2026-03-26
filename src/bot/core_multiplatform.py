@@ -64,6 +64,7 @@ class MultiPlatformBot:
         self.deps["adapter"] = self.adapter
         self.orchestrator.deps["adapter"] = self.adapter
         self.orchestrator.deps["core_engine"] = self.core_engine
+        self.orchestrator.deps["settings"] = self.settings
 
         # Initialize feature registry
         self.feature_registry = FeatureRegistry(

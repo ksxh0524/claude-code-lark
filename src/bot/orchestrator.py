@@ -1734,7 +1734,10 @@ class MessageOrchestrator:
     # --- Lark platform handlers ---
 
     async def handle_message(self, event_data: Dict[str, Any]) -> None:
-        """Handle incoming message from Lark platform - reuses agentic logic."""
+        """Handle incoming message from Lark platform.
+
+        Uses adapter's CoreEngine-based processing with streaming cards and Stop button.
+        """
         message = event_data.get("message", {})
         sender = event_data.get("sender", {})
         chat_id = message.get("chat_id", "")
@@ -1758,43 +1761,45 @@ class MessageOrchestrator:
             await self.handle_command(event_data)
             return
 
-        # Get adapter and claude_integration - same as Telegram
+        # Get adapter
         adapter = self.deps.get("adapter")
-        claude_integration = self.deps.get("claude_integration")
-
-        if not adapter or not claude_integration:
-            logger.error("Missing adapter or claude_integration")
-            if adapter:
-                await adapter.send_message(chat_id, "❌ Claude 未配置")
+        if not adapter:
+            logger.error("No adapter available")
             return
 
-        # Send "working" message
-        await adapter.send_message(chat_id, "⏳ 正在处理...")
+        # Check if adapter has _process_with_core_engine (Lark adapter with streaming card support)
+        if hasattr(adapter, "_process_with_core_engine") and callable(adapter._process_with_core_engine):
+            # Use the adapter's streaming card implementation with Stop button support
+            await adapter._process_with_core_engine(chat_id, text, sender)
+        else:
+            # Fallback for other adapters - simple message processing
+            claude_integration = self.deps.get("claude_integration")
+            if not claude_integration:
+                logger.error("Missing claude_integration")
+                await adapter.send_message(chat_id, "❌ Claude 未配置")
+                return
 
-        try:
-            # Call Claude - same logic as agentic_text
-            working_dir = Path(self.settings.approved_directory)
+            await adapter.send_message(chat_id, "⏳ 正在处理...")
 
-            async for event in claude_integration.run_command(
-                command=text,
-                working_directory=str(working_dir),
-                user_id=hash(user_id) % 1000000,  # Convert to int
-            ):
-                # Handle different event types
-                if event.get("type") == "assistant_response":
-                    response_text = event.get("content", "")
-                    if response_text:
-                        await adapter.send_message(chat_id, response_text)
-                elif event.get("type") == "error":
-                    await adapter.send_message(chat_id, f"❌ 错误: {event.get('message', 'Unknown error')}")
-                    break
-
-        except Exception as e:
-            logger.error("Claude execution error", error=str(e))
-            await adapter.send_message(chat_id, f"❌ 执行出错: {str(e)}")
+            try:
+                response = await claude_integration.run_command(
+                    prompt=text,
+                    working_directory=Path(self.settings.approved_directory),
+                    user_id=hash(user_id) % 1000000,
+                )
+                if response.content:
+                    await adapter.send_message(chat_id, response.content)
+            except Exception as e:
+                logger.error("Claude execution error", error=str(e))
+                await adapter.send_message(chat_id, f"❌ 执行出错: {str(e)}")
 
     async def handle_command(self, event_data: Dict[str, Any]) -> None:
-        """Handle command from Lark platform."""
+        """Handle command from Lark platform.
+
+        Supports both Agentic and Classic mode commands:
+        - Agentic: /start, /new, /status, /verbose, /repo, /restart, /sync_threads
+        - Classic: /help, /continue, /end, /ls, /cd, /pwd, /projects, /export, /actions, /git
+        """
         import structlog
         logger = structlog.get_logger()
 
@@ -1826,20 +1831,556 @@ class MessageOrchestrator:
             logger.error("No adapter available for Lark reply")
             return
 
-        # Parse command
-        command = text.strip().lstrip("/").split()[0] if text else ""
+        # Parse command and args
+        parts = text.strip().lstrip("/").split(maxsplit=2)
+        command = parts[0].lower() if parts else ""
+        args = parts[1:] if len(parts) > 1 else []
+
+        # Get dependencies
+        settings = self.deps.get("settings")
+        storage = self.deps.get("storage")
+        claude_integration = self.deps.get("claude_integration")
+        audit_logger = self.deps.get("audit_logger")
+
+        # Get user info
+        open_id = sender.get("open_id", "")
+        user_id = hash(open_id) % 1000000
+
+        # Known commands - if not in this list, pass to message handler (Claude)
+        known_commands = {
+            "start", "help", "new", "status", "verbose", "repo", "restart",
+            "sync_threads", "continue", "end", "ls", "cd", "pwd", "projects",
+            "export", "actions", "git", "list",
+        }
+
+        if command not in known_commands:
+            # Unknown command, pass to message handler (treat as Claude prompt)
+            await self.handle_message(event_data)
+            return
+
+        # --- Agentic Mode Commands ---
 
         if command == "start":
-            await adapter.send_message(chat_id, "👋 欢迎使用 Claude Code Bot!\n\n发送任意消息与我对话。")
-        elif command == "help":
-            await adapter.send_message(chat_id, "可用命令:\n/start - 开始\n/help - 帮助\n/status - 状态")
+            await self._cmd_start(adapter, chat_id, sender, settings)
+
+        elif command == "new":
+            await self._cmd_new(adapter, chat_id, user_id, storage, audit_logger)
+
         elif command == "status":
-            await adapter.send_message(chat_id, "✅ Bot 运行正常\n平台: Lark/飞书")
+            await self._cmd_status(adapter, chat_id, user_id, storage, claude_integration)
+
+        elif command == "verbose":
+            level = int(args[0]) if args and args[0].isdigit() else None
+            await self._cmd_verbose(adapter, chat_id, user_id, level, storage)
+
+        elif command == "repo":
+            repo_name = args[0] if args else None
+            await self._cmd_repo(adapter, chat_id, user_id, repo_name, settings, storage)
+
+        elif command == "restart":
+            await self._cmd_restart(adapter, chat_id)
+
+        elif command == "sync_threads":
+            await self._cmd_sync_threads(adapter, chat_id, settings)
+
+        # --- Classic Mode Commands ---
+
+        elif command == "help":
+            await self._cmd_help(adapter, chat_id)
+
+        elif command == "continue":
+            prompt = args[0] if args else None
+            await self._cmd_continue(adapter, chat_id, user_id, prompt, storage, event_data)
+
+        elif command == "end":
+            await self._cmd_end(adapter, chat_id, user_id, storage, audit_logger)
+
+        elif command == "ls":
+            await self._cmd_ls(adapter, chat_id, user_id, settings, storage)
+
+        elif command == "cd":
+            directory = args[0] if args else None
+            await self._cmd_cd(adapter, chat_id, user_id, directory, settings, storage)
+
+        elif command == "pwd":
+            await self._cmd_pwd(adapter, chat_id, user_id, storage)
+
+        elif command == "projects":
+            await self._cmd_projects(adapter, chat_id, settings)
+
+        elif command == "export":
+            format_type = args[0] if args else "markdown"
+            await self._cmd_export(adapter, chat_id, user_id, format_type, storage)
+
+        elif command == "actions":
+            await self._cmd_actions(adapter, chat_id, user_id, settings, storage)
+
+        elif command == "git":
+            git_cmd = args[0] if args else "status"
+            await self._cmd_git(adapter, chat_id, user_id, git_cmd, settings, storage)
+
+        elif command == "list":
+            await self._cmd_list(adapter, chat_id)
+
+    # --- Command Implementation Methods ---
+
+    async def _cmd_start(self, adapter, chat_id: str, sender: dict, settings) -> None:
+        """Handle /start command."""
+        username = sender.get("nickname", sender.get("user_id", "用户"))
+        welcome = (
+            f"👋 欢迎使用 Claude Code Bot, {username}!\n\n"
+            f"🤖 我可以帮助你通过飞书远程访问 Claude Code。\n\n"
+            f"<b>可用命令:</b>\n"
+            f"• /new - 开始新会话\n"
+            f"• /status - 查看会话状态\n"
+            f"• /verbose [0|1|2] - 设置输出详细程度\n"
+            f"• /repo [name] - 列出/切换工作目录\n"
+            f"• /help - 显示完整帮助\n"
+            f"• /ls - 列出文件\n"
+            f"• /cd &lt;dir&gt; - 切换目录\n"
+            f"• /pwd - 显示当前目录\n"
+            f"• /projects - 显示所有项目\n"
+            f"• /export - 导出会话\n"
+            f"• /git - Git 命令\n\n"
+            f"💡 发送任意消息与 Claude 对话！"
+        )
+        await adapter.send_message(chat_id, welcome)
+
+    async def _cmd_new(self, adapter, chat_id: str, user_id: int, storage, audit_logger) -> None:
+        """Handle /new command - start fresh session."""
+        try:
+            if storage:
+                # Clear session for this user
+                await storage.clear_user_session(user_id)
+            msg = "🆕 已开始新会话，上下文已清除。"
+            await adapter.send_message(chat_id, msg)
+            if audit_logger:
+                await audit_logger.log_command(user_id, "new", [], True)
+        except Exception as e:
+            await adapter.send_message(chat_id, f"❌ 重置会话失败: {str(e)}")
+
+    async def _cmd_status(self, adapter, chat_id: str, user_id: int, storage, claude_integration) -> None:
+        """Handle /status command."""
+        try:
+            status_parts = ["📊 <b>会话状态</b>\n"]
+
+            # Get session info
+            if storage:
+                session = await storage.get_active_session(user_id)
+                if session:
+                    status_parts.append(f"• 会话 ID: <code>{session.session_id[:16]}...</code>")
+                    status_parts.append(f"• 工作目录: <code>{session.working_directory}</code>")
+                    status_parts.append(f"• 创建时间: {session.created_at.strftime('%Y-%m-%d %H:%M')}")
+                else:
+                    status_parts.append("• 无活跃会话")
+
+            # Get cost info
+            if claude_integration:
+                cost_info = await claude_integration.get_user_cost(user_id)
+                if cost_info:
+                    status_parts.append(f"\n💰 <b>使用统计</b>")
+                    status_parts.append(f"• 总成本: ${cost_info.get('total_cost', 0):.4f}")
+                    status_parts.append(f"• 请求数: {cost_info.get('request_count', 0)}")
+
+            status_parts.append(f"\n✅ Bot 运行正常")
+            status_parts.append(f"📍 平台: Lark/飞书")
+
+            await adapter.send_message(chat_id, "\n".join(status_parts))
+        except Exception as e:
+            await adapter.send_message(chat_id, f"✅ Bot 运行正常\n平台: Lark/飞书\n\n获取详细状态失败: {str(e)}")
+
+    async def _cmd_verbose(self, adapter, chat_id: str, user_id: int, level: Optional[int], storage) -> None:
+        """Handle /verbose command - set output verbosity."""
+        # Use in-memory cache for user settings (like Telegram's context.user_data)
+        if not hasattr(self, "_user_settings"):
+            self._user_settings: Dict[int, Dict[str, Any]] = {}
+
+        try:
+            if level is None:
+                # Get current level from memory cache
+                current = self._user_settings.get(user_id, {}).get("verbose_level", 1)
+                msg = (
+                    f"📢 <b>当前详细程度: {current}</b>\n\n"
+                    f"• 0 = 静默 (仅最终响应)\n"
+                    f"• 1 = 正常 (显示工具名称)\n"
+                    f"• 2 = 详细 (显示工具输入)"
+                )
+            else:
+                if level not in (0, 1, 2):
+                    await adapter.send_message(chat_id, "❌ 详细程度必须是 0、1 或 2")
+                    return
+                # Store in memory cache
+                if user_id not in self._user_settings:
+                    self._user_settings[user_id] = {}
+                self._user_settings[user_id]["verbose_level"] = level
+                msg = f"✅ 已设置详细程度为 {level}"
+            await adapter.send_message(chat_id, msg)
+        except Exception as e:
+            await adapter.send_message(chat_id, f"❌ 设置失败: {str(e)}")
+
+    async def _cmd_repo(self, adapter, chat_id: str, user_id: int, repo_name: Optional[str], settings, storage) -> None:
+        """Handle /repo command - list or switch workspace."""
+        # Use in-memory cache for user settings (like Telegram's context.user_data)
+        if not hasattr(self, "_user_settings"):
+            self._user_settings: Dict[int, Dict[str, Any]] = {}
+
+        try:
+            if settings is None:
+                await adapter.send_message(chat_id, "⚠️ 配置不可用")
+                return
+
+            approved_dir = Path(settings.approved_directory)
+
+            if repo_name:
+                # Try to switch to specified repo
+                target_dir = approved_dir / repo_name
+                if target_dir.exists() and target_dir.is_dir():
+                    # Store in memory cache
+                    if user_id not in self._user_settings:
+                        self._user_settings[user_id] = {}
+                    self._user_settings[user_id]["working_directory"] = str(target_dir)
+                    await adapter.send_message(chat_id, f"✅ 已切换到: <code>{repo_name}</code>")
+                else:
+                    await adapter.send_message(chat_id, f"❌ 目录不存在: <code>{repo_name}</code>")
+            else:
+                # List available repos
+                repos = []
+                for item in approved_dir.iterdir():
+                    if item.is_dir() and not item.name.startswith("."):
+                        repos.append(item.name)
+
+                if repos:
+                    repos_text = "\n".join(f"• <code>{r}</code>" for r in sorted(repos)[:20])
+                    msg = f"📁 <b>可用项目:</b>\n\n{repos_text}"
+                    if len(repos) > 20:
+                        msg += f"\n\n... 还有 {len(repos) - 20} 个项目"
+                else:
+                    msg = "📁 没有找到项目"
+                await adapter.send_message(chat_id, msg)
+        except Exception as e:
+            await adapter.send_message(chat_id, f"❌ 获取项目列表失败: {str(e)}")
+
+    async def _cmd_restart(self, adapter, chat_id: str) -> None:
+        """Handle /restart command."""
+        await adapter.send_message(chat_id, "🔄 正在重启机器人...")
+        # The actual restart logic would be handled by the main application
+
+    async def _cmd_sync_threads(self, adapter, chat_id: str, settings) -> None:
+        """Handle /sync_threads command."""
+        if not settings or not getattr(settings, "enable_project_threads", False):
+            await adapter.send_message(chat_id, "ℹ️ 项目主题功能未启用")
+            return
+        await adapter.send_message(chat_id, "🔄 项目主题同步功能需要通过 Telegram 使用")
+
+    async def _cmd_help(self, adapter, chat_id: str) -> None:
+        """Handle /help command."""
+        help_text = (
+            "🤖 <b>Claude Code Bot 帮助</b>\n\n"
+            "<b>会话命令:</b>\n"
+            "• /new - 开始新会话\n"
+            "• /status - 查看会话状态\n"
+            "• /verbose [0|1|2] - 设置输出详细程度\n\n"
+            "<b>导航命令:</b>\n"
+            "• /ls - 列出文件\n"
+            "• /cd &lt;dir&gt; - 切换目录\n"
+            "• /pwd - 显示当前目录\n"
+            "• /repo [name] - 列出/切换项目\n"
+            "• /projects - 显示所有项目\n\n"
+            "<b>其他命令:</b>\n"
+            "• /export - 导出会话\n"
+            "• /git - Git 命令\n"
+            "• /restart - 重启机器人\n\n"
+            "<b>使用提示:</b>\n"
+            "• 发送任意文本与 Claude 对话\n"
+            "• 上传文件让 Claude 分析\n"
+            "• 上传图片让 Claude 查看\n\n"
+            "需要帮助? 联系管理员。"
+        )
+        await adapter.send_message(chat_id, help_text)
+
+    async def _cmd_continue(self, adapter, chat_id: str, user_id: int, prompt: Optional[str], storage, event_data) -> None:
+        """Handle /continue command - continue last session."""
+        # Simply pass to message handler with optional prompt
+        if prompt:
+            # Modify event data to include just the prompt
+            modified_event = dict(event_data)
+            message = dict(event_data.get("message", {}))
+            content = json.loads(message.get("content", "{}"))
+            content["text"] = prompt
+            message["content"] = json.dumps(content)
+            modified_event["message"] = message
+            await self.handle_message(modified_event)
         else:
-            # Unknown command, pass to message handler
-            await self.handle_message(event_data)
+            await adapter.send_message(chat_id, "请提供继续会话的内容，例如: /continue 请继续")
+
+    async def _cmd_end(self, adapter, chat_id: str, user_id: int, storage, audit_logger) -> None:
+        """Handle /end command - end current session."""
+        try:
+            if storage:
+                await storage.clear_user_session(user_id)
+            await adapter.send_message(chat_id, "🏁 会话已结束，上下文已清除。")
+            if audit_logger:
+                await audit_logger.log_command(user_id, "end", [], True)
+        except Exception as e:
+            await adapter.send_message(chat_id, f"❌ 结束会话失败: {str(e)}")
+
+    async def _cmd_ls(self, adapter, chat_id: str, user_id: int, settings, storage) -> None:
+        """Handle /ls command - list files."""
+        try:
+            if settings is None:
+                await adapter.send_message(chat_id, "⚠️ 配置不可用")
+                return
+
+            # Get working directory
+            work_dir = settings.approved_directory
+            if storage:
+                work_dir = await storage.get_user_setting(user_id, "working_directory", work_dir)
+
+            work_path = Path(work_dir)
+            if not work_path.exists():
+                await adapter.send_message(chat_id, f"❌ 目录不存在: <code>{work_dir}</code>")
+                return
+
+            # List files
+            items = []
+            for item in sorted(work_path.iterdir(), key=lambda x: (not x.is_dir(), x.name)):
+                if item.name.startswith("."):
+                    continue
+                icon = "📁" if item.is_dir() else "📄"
+                items.append(f"{icon} <code>{item.name}</code>")
+
+            if items:
+                msg = f"📁 <b>{work_path.name}</b>\n\n" + "\n".join(items[:50])
+                if len(items) > 50:
+                    msg += f"\n\n... 还有 {len(items) - 50} 项"
+            else:
+                msg = "📁 目录为空"
+            await adapter.send_message(chat_id, msg)
+        except Exception as e:
+            await adapter.send_message(chat_id, f"❌ 列出文件失败: {str(e)}")
+
+    async def _cmd_cd(self, adapter, chat_id: str, user_id: int, directory: Optional[str], settings, storage) -> None:
+        """Handle /cd command - change directory."""
+        if not directory:
+            await adapter.send_message(chat_id, "请指定目录，例如: /cd myproject")
+            return
+
+        try:
+            if settings is None:
+                await adapter.send_message(chat_id, "⚠️ 配置不可用")
+                return
+
+            # Get current working directory
+            current_dir = Path(settings.approved_directory)
+            if storage:
+                current_dir = Path(await storage.get_user_setting(user_id, "working_directory", str(current_dir)))
+
+            # Resolve target directory
+            if directory == "..":
+                target_dir = current_dir.parent
+            elif directory.startswith("/"):
+                target_dir = Path(directory)
+            else:
+                target_dir = current_dir / directory
+
+            # Security check - must be within approved directory
+            approved_path = Path(settings.approved_directory).resolve()
+            try:
+                target_dir.resolve().relative_to(approved_path)
+            except ValueError:
+                await adapter.send_message(chat_id, "❌ 不能访问批准目录之外的路径")
+                return
+
+            if not target_dir.exists():
+                await adapter.send_message(chat_id, f"❌ 目录不存在: <code>{directory}</code>")
+                return
+
+            if not target_dir.is_dir():
+                await adapter.send_message(chat_id, f"❌ 不是目录: <code>{directory}</code>")
+                return
+
+            # Update working directory
+            if storage:
+                await storage.set_user_setting(user_id, "working_directory", str(target_dir))
+
+            await adapter.send_message(chat_id, f"✅ 已切换到: <code>{target_dir.relative_to(approved_path)}</code>")
+        except Exception as e:
+            await adapter.send_message(chat_id, f"❌ 切换目录失败: {str(e)}")
+
+    async def _cmd_pwd(self, adapter, chat_id: str, user_id: int, storage) -> None:
+        """Handle /pwd command - print working directory."""
+        try:
+            if storage:
+                work_dir = await storage.get_user_setting(user_id, "working_directory", "未知")
+            else:
+                work_dir = "未知"
+            await adapter.send_message(chat_id, f"📁 当前目录: <code>{work_dir}</code>")
+        except Exception as e:
+            await adapter.send_message(chat_id, f"❌ 获取目录失败: {str(e)}")
+
+    async def _cmd_projects(self, adapter, chat_id: str, settings) -> None:
+        """Handle /projects command - show all projects."""
+        try:
+            if settings is None:
+                await adapter.send_message(chat_id, "⚠️ 配置不可用")
+                return
+
+            approved_dir = Path(settings.approved_directory)
+            projects = []
+
+            for item in approved_dir.iterdir():
+                if item.is_dir() and not item.name.startswith("."):
+                    # Check if it looks like a project (has certain files)
+                    is_project = any(
+                        (item / f).exists()
+                        for f in [".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "requirements.txt"]
+                    )
+                    projects.append((item.name, is_project))
+
+            if projects:
+                lines = []
+                for name, is_proj in sorted(projects):
+                    icon = "📦" if is_proj else "📁"
+                    lines.append(f"{icon} <code>{name}</code>")
+                msg = "📁 <b>所有项目:</b>\n\n" + "\n".join(lines[:30])
+                if len(projects) > 30:
+                    msg += f"\n\n... 还有 {len(projects) - 30} 个目录"
+            else:
+                msg = "📁 没有找到项目"
+            await adapter.send_message(chat_id, msg)
+        except Exception as e:
+            await adapter.send_message(chat_id, f"❌ 获取项目失败: {str(e)}")
+
+    async def _cmd_export(self, adapter, chat_id: str, user_id: int, format_type: str, storage) -> None:
+        """Handle /export command - export session."""
+        try:
+            if storage is None:
+                await adapter.send_message(chat_id, "⚠️ 存储服务不可用")
+                return
+
+            # Get session messages
+            messages = await storage.get_session_messages(user_id)
+            if not messages:
+                await adapter.send_message(chat_id, "没有可导出的会话内容")
+                return
+
+            # Format based on type
+            if format_type == "json":
+                import json
+                content = json.dumps(messages, indent=2, ensure_ascii=False, default=str)
+            else:
+                # Markdown format
+                lines = ["# 会话导出\n"]
+                for msg in messages:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    lines.append(f"## {role}\n\n{content}\n")
+                content = "\n".join(lines)
+
+            # Send as file
+            await adapter.send_file(chat_id, content.encode(), filename=f"session_export.{format_type}")
+        except Exception as e:
+            await adapter.send_message(chat_id, f"❌ 导出失败: {str(e)}")
+
+    async def _cmd_actions(self, adapter, chat_id: str, user_id: int, settings, storage) -> None:
+        """Handle /actions command - show quick actions."""
+        actions = [
+            ("🔍 代码审查", "请审查当前目录的代码"),
+            ("🧪 运行测试", "请运行项目测试"),
+            ("📝 生成文档", "请为项目生成 README"),
+            ("🔧 修复问题", "请检查并修复代码问题"),
+        ]
+        lines = ["⚡ <b>快速操作</b>\n"]
+        for emoji_name, prompt in actions:
+            lines.append(f"{emoji_name}\n<i>{prompt}</i>\n")
+        lines.append("\n💡 发送上述提示语或自定义消息与 Claude 对话")
+        await adapter.send_message(chat_id, "\n".join(lines))
+
+    async def _cmd_git(self, adapter, chat_id: str, user_id: int, git_cmd: str, settings, storage) -> None:
+        """Handle /git command - git operations."""
+        try:
+            if settings is None:
+                await adapter.send_message(chat_id, "⚠️ 配置不可用")
+                return
+
+            # Get working directory
+            work_dir = Path(settings.approved_directory)
+            if storage:
+                work_dir = Path(await storage.get_user_setting(user_id, "working_directory", str(work_dir)))
+
+            # Check if it's a git repo
+            git_dir = work_dir / ".git"
+            if not git_dir.exists():
+                await adapter.send_message(chat_id, "❌ 当前目录不是 Git 仓库")
+                return
+
+            import subprocess
+
+            if git_cmd == "status":
+                result = subprocess.run(["git", "status", "--short"], cwd=work_dir, capture_output=True, text=True)
+                msg = f"📋 <b>Git Status</b>\n\n<pre>{result.stdout or '工作区干净'}</pre>"
+            elif git_cmd == "log":
+                result = subprocess.run(["git", "log", "--oneline", "-10"], cwd=work_dir, capture_output=True, text=True)
+                msg = f"📜 <b>Git Log (最近10条)</b>\n\n<pre>{result.stdout or '无提交历史'}</pre>"
+            elif git_cmd == "branch":
+                result = subprocess.run(["git", "branch"], cwd=work_dir, capture_output=True, text=True)
+                msg = f"🌿 <b>Git Branches</b>\n\n<pre>{result.stdout or '无分支'}</pre>"
+            else:
+                msg = (
+                    "🌳 <b>Git 命令</b>\n\n"
+                    "• /git status - 查看状态\n"
+                    "• /git log - 查看提交历史\n"
+                    "• /git branch - 查看分支"
+                )
+
+            await adapter.send_message(chat_id, msg)
+        except Exception as e:
+            await adapter.send_message(chat_id, f"❌ Git 命令失败: {str(e)}")
+
+    async def _cmd_list(self, adapter, chat_id: str) -> None:
+        """Handle /list command - show all available commands with descriptions."""
+        commands_list = (
+            "📋 <b>所有可用命令</b>\n\n"
+            "<b>会话管理:</b>\n"
+            "• /start - 开始使用机器人，显示欢迎信息\n"
+            "• /new - 开始新的 Claude 会话\n"
+            "• /status - 查看当前会话状态\n"
+            "• /continue [prompt] - 继续上一次会话\n"
+            "• /end - 结束当前会话\n"
+            "• /restart - 重启机器人\n\n"
+            "<b>输出控制:</b>\n"
+            "• /verbose [0|1|2] - 设置输出详细程度\n"
+            "  • 0 = 静默（仅最终结果）\n"
+            "  • 1 = 正常（显示工具名称）\n"
+            "  • 2 = 详细（显示工具输入和推理）\n\n"
+            "<b>目录导航:</b>\n"
+            "• /ls - 列出当前目录文件\n"
+            "• /cd &lt;dir&gt; - 切换工作目录\n"
+            "• /pwd - 显示当前工作目录\n"
+            "• /repo [name] - 列出/切换项目仓库\n"
+            "• /projects - 显示所有可用项目\n\n"
+            "<b>Git 操作:</b>\n"
+            "• /git [status|log|branch] - 执行 Git 命令\n\n"
+            "<b>其他功能:</b>\n"
+            "• /export [format] - 导出会话记录\n"
+            "  • markdown (默认)\n"
+            "  • json\n"
+            "  • txt\n"
+            "• /actions - 显示快速操作提示\n"
+            "• /help - 显示帮助信息\n"
+            "• /list - 显示此命令列表\n\n"
+            "<b>同步功能:</b>\n"
+            "• /sync_threads - 同步项目线程\n\n"
+            "💡 <i>发送任意文本与 Claude 对话，上传文件/图片让 Claude 分析</i>"
+        )
+        await adapter.send_message(chat_id, commands_list)
 
     async def handle_callback(self, event_data: Dict[str, Any]) -> None:
+        """Handle callback from Lark platform (button clicks)."""
+        import structlog
+        logger = structlog.get_logger()
+
+        logger.info("Lark callback received", event_data=event_data)
         """Handle callback from Lark platform (button clicks)."""
         import structlog
         logger = structlog.get_logger()

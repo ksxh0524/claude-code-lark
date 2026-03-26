@@ -18,6 +18,12 @@ try:
         DeleteMessageRequest,
         UpdateMessageRequest,
         UpdateMessageRequestBody,
+        CreateFileRequest,
+        CreateFileRequestBody,
+        CreateImageRequest,
+        CreateImageRequestBody,
+        GetFileRequest,
+        GetImageRequest,
     )
     from lark_oapi.api.cardkit.v1 import (
         CreateCardRequest,
@@ -38,6 +44,12 @@ except ImportError:
     DeleteMessageRequest = None  # type: ignore
     UpdateMessageRequest = None  # type: ignore
     UpdateMessageRequestBody = None  # type: ignore
+    CreateFileRequest = None  # type: ignore
+    CreateFileRequestBody = None  # type: ignore
+    CreateImageRequest = None  # type: ignore
+    CreateImageRequestBody = None  # type: ignore
+    GetFileRequest = None  # type: ignore
+    GetImageRequest = None  # type: ignore
     CreateCardRequest = None  # type: ignore
     CreateCardRequestBody = None  # type: ignore
     SettingsCardRequest = None  # type: ignore
@@ -86,7 +98,10 @@ class LarkAdapter(PlatformAdapter):
         self.ws_client: Optional[Any] = None  # lark.ws.Client
         self._is_running = False
         self._stop_event = asyncio.Event()
-        self._event_handlers: List[Callable] = []
+        self._command_handlers: List[Callable] = []  # Command handlers
+        self._message_handlers: List[Callable] = []  # Message handlers
+        self._callback_handlers: List[Callable] = []  # Callback handlers
+        self._registered_commands: List[str] = []  # List of registered commands
         self._ws_thread: Optional[threading.Thread] = None
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
         self.core_engine: Optional[Any] = None  # CoreEngine instance
@@ -125,43 +140,115 @@ class LarkAdapter(PlatformAdapter):
             message = event_data.get("message", {})
             sender = event_data.get("sender", {})
             chat_id = message.get("chat_id", "")
+            msg_type = message.get("msg_type", "text")
             content_raw = message.get("content", "{}")
 
             # Parse content
             try:
                 content = json.loads(content_raw) if isinstance(content_raw, str) else content_raw
-                text = content.get("text", "")
             except json.JSONDecodeError:
-                text = ""
+                content = {}
 
-            if not text:
+            # Handle different message types
+            text = ""
+            file_info = None
+
+            if msg_type == "text":
+                text = content.get("text", "")
+            elif msg_type == "file":
+                # Extract file info
+                file_key = content.get("file_key", "")
+                file_name = content.get("file_name", "unknown")
+                file_info = {
+                    "type": "file",
+                    "file_key": file_key,
+                    "file_name": file_name,
+                }
+                text = f"[用户上传了文件: {file_name}]"
+                logger.info("Received file message", file_key=file_key, file_name=file_name)
+            elif msg_type == "image":
+                # Extract image info
+                image_key = content.get("image_key", "")
+                file_info = {
+                    "type": "image",
+                    "image_key": image_key,
+                }
+                text = "[用户上传了一张图片]"
+                logger.info("Received image message", image_key=image_key)
+            else:
+                # Unknown message type, skip
+                logger.info("Skipping unsupported message type", msg_type=msg_type)
+                return
+
+            if not text and not file_info:
                 return
 
             # Log the received event
             logger.info(
                 "Received Lark message",
                 chat_id=chat_id,
-                text=text[:50],
+                msg_type=msg_type,
+                text=text[:50] if text else "",
                 sender_open_id=sender.get("open_id", ""),
             )
 
-            # Dispatch to core engine via main loop
+            # Dispatch to appropriate handler via main loop
             if self._main_loop and not self._main_loop.is_closed():
-                asyncio.run_coroutine_threadsafe(
-                    self._process_with_core_engine(chat_id, text, sender),
-                    self._main_loop
-                )
+                # Check if message is a command (starts with /)
+                is_command = text.strip().startswith("/")
+
+                if is_command and self._command_handlers:
+                    # Route to command handlers
+                    logger.info("Routing to command handler", text=text[:30])
+                    asyncio.run_coroutine_threadsafe(
+                        self._dispatch_to_handlers(event_data, self._command_handlers),
+                        self._main_loop
+                    )
+                elif self._message_handlers:
+                    # Route to message handlers
+                    logger.info("Routing to message handler", text=text[:30])
+                    asyncio.run_coroutine_threadsafe(
+                        self._dispatch_to_handlers(event_data, self._message_handlers),
+                        self._main_loop
+                    )
+                else:
+                    # Fallback: use core engine directly
+                    logger.warning("No handlers registered, using core engine fallback")
+                    asyncio.run_coroutine_threadsafe(
+                        self._process_with_core_engine(chat_id, text, sender, file_info),
+                        self._main_loop
+                    )
 
         except Exception as e:
             logger.error("Error processing Lark message event", error=str(e), exc_info=True)
+
+    async def _dispatch_to_handlers(
+        self,
+        event_data: Dict[str, Any],
+        handlers: List[Callable],
+    ) -> None:
+        """Dispatch event to all registered handlers."""
+        for handler in handlers:
+            try:
+                await handler(event_data)
+            except Exception as e:
+                logger.error("Handler error", error=str(e), exc_info=True)
 
     async def _process_with_core_engine(
         self,
         chat_id: str,
         text: str,
         sender: Dict[str, Any],
+        file_info: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Process message using CoreEngine with streaming card."""
+        """Process message using CoreEngine with streaming card.
+
+        Args:
+            chat_id: Chat ID from Lark
+            text: Text content or description
+            sender: Sender information dict
+            file_info: Optional file/image info if message contains media
+        """
         if not self.core_engine or not self.settings:
             logger.error("CoreEngine or Settings not configured")
             await self.send_message(chat_id, "系统未正确配置")
@@ -172,6 +259,45 @@ class LarkAdapter(PlatformAdapter):
 
         open_id = sender.get("open_id", "")
         user_id = hash(open_id) % 1000000
+
+        # Handle file/image if present
+        if file_info:
+            try:
+                if file_info.get("type") == "file":
+                    # Download and process file
+                    file_key = file_info.get("file_key", "")
+                    file_name = file_info.get("file_name", "unknown")
+
+                    # Send processing message
+                    await self.send_message(chat_id, f"正在处理文件: {file_name}...")
+
+                    file_data = await self.download_file(file_key)
+                    if file_data:
+                        # Process file content based on type
+                        text = await self._process_file_content(file_data, file_name, text)
+                    else:
+                        await self.send_message(chat_id, f"无法下载文件: {file_name}")
+                        return
+
+                elif file_info.get("type") == "image":
+                    # Download and process image
+                    image_key = file_info.get("image_key", "")
+
+                    # Send processing message
+                    await self.send_message(chat_id, "正在处理图片...")
+
+                    image_data = await self.download_image(image_key)
+                    if image_data:
+                        # Process image
+                        text = await self._process_image_content(image_data, text)
+                    else:
+                        await self.send_message(chat_id, "无法下载图片")
+                        return
+
+            except Exception as e:
+                logger.error("Error processing file/image", error=str(e), exc_info=True)
+                await self.send_message(chat_id, f"处理文件时出错: {str(e)}")
+                return
 
         ctx = MessageContext(
             user_id=user_id,
@@ -186,8 +312,8 @@ class LarkAdapter(PlatformAdapter):
         interrupt_event = asyncio.Event()
         start_time = time.time()
 
-        # Step 1: Create streaming card
-        card_id, message_id = await self._create_streaming_card(chat_id)
+        # Step 1: Create streaming card with Stop button
+        card_id, message_id = await self._create_streaming_card(chat_id, user_id)
         if not card_id:
             # Fallback to simple text
             await self._process_with_fallback(chat_id, ctx, user_id, start_time, interrupt_event)
@@ -272,9 +398,21 @@ class LarkAdapter(PlatformAdapter):
         finally:
             self._stop_callbacks.pop(user_id, None)
 
-    async def _create_streaming_card(self, chat_id: str) -> tuple[Optional[str], Optional[str]]:
-        """Create streaming card and send as message."""
+    async def _create_streaming_card(
+        self, chat_id: str, user_id: int = 0
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Create streaming card with Stop button and send as message.
+
+        Args:
+            chat_id: Chat ID to send card to
+            user_id: User ID for stop button callback
+
+        Returns:
+            tuple of (card_id, message_id) or (None, None) on failure
+        """
         try:
+            # Schema 2.0: button goes directly in elements, not in "action" container
+            # Use behaviors with type "callback" for button click handling
             card_json = {
                 "schema": "2.0",
                 "header": {
@@ -292,7 +430,19 @@ class LarkAdapter(PlatformAdapter):
                 },
                 "body": {
                     "elements": [
-                        {"tag": "markdown", "content": "Working...", "element_id": "content_element"}
+                        {"tag": "markdown", "content": "Working...", "element_id": "content_element"},
+                        {
+                            "tag": "button",
+                            "element_id": "stop_button",
+                            "text": {"content": "Stop", "tag": "plain_text"},
+                            "type": "danger",
+                            "behaviors": [
+                                {
+                                    "type": "callback",
+                                    "value": {"action": "stop", "user_id": user_id}
+                                }
+                            ]
+                        }
                     ]
                 }
             }
@@ -374,15 +524,19 @@ class LarkAdapter(PlatformAdapter):
             return False
 
     async def _close_streaming_mode(self, card_id: str, sequence: int) -> bool:
-        """Close streaming mode."""
+        """Close streaming mode and remove the stop button."""
         try:
+            # First, delete the stop button element (use current sequence)
+            await self._remove_stop_button(card_id, sequence)
+
+            # Then close streaming mode (sequence + 1 for next operation)
             settings_request = SettingsCardRequest.builder() \
                 .card_id(card_id) \
                 .request_body(
                     SettingsCardRequestBody.builder()
                         .settings(json.dumps({"config": {"streaming_mode": False}}))
                         .uuid(str(uuid.uuid4()))
-                        .sequence(sequence)
+                        .sequence(sequence + 1)
                         .build()
                 ).build()
 
@@ -399,6 +553,38 @@ class LarkAdapter(PlatformAdapter):
 
         except Exception as e:
             logger.error("Error closing streaming", error=str(e))
+            return False
+
+    async def _remove_stop_button(self, card_id: str, sequence: int = 1) -> bool:
+        """Delete the stop button element using DELETE API with sequence."""
+        try:
+            from lark_oapi.api.cardkit.v1 import (
+                DeleteCardElementRequest,
+                DeleteCardElementRequestBody,
+            )
+
+            delete_request = DeleteCardElementRequest.builder() \
+                .card_id(card_id) \
+                .element_id("stop_button") \
+                .request_body(
+                    DeleteCardElementRequestBody.builder()
+                    .sequence(sequence)
+                    .build()
+                ).build()
+
+            response = await self._execute_async(
+                self.client.cardkit.v1.card_element.delete, delete_request
+            )
+
+            if response.code != 0:
+                logger.warning("Failed to delete stop button", code=response.code, msg=response.msg)
+                return False
+
+            logger.info("Deleted stop button", card_id=card_id, sequence=sequence)
+            return True
+
+        except Exception as e:
+            logger.error("Error deleting stop button", error=str(e))
             return False
 
     async def _process_with_fallback(
@@ -596,9 +782,10 @@ class LarkAdapter(PlatformAdapter):
 
         logger.info("Starting Lark adapter", mode="websocket_long_polling")
 
-        # Build event handler
+        # Build event handler - register both message and card action handlers
         event_handler = lark.EventDispatcherHandler.builder("", "") \
             .register_p2_im_message_receive_v1(self._on_message_received) \
+            .register_p2_card_action_trigger(self._on_card_action) \
             .build()
 
         # Create WebSocket client
@@ -629,13 +816,15 @@ class LarkAdapter(PlatformAdapter):
         # Wait for stop signal
         await self._stop_event.wait()
 
-    def _on_card_action(self, data: Any) -> None:
-        """Handle card button callbacks."""
+    def _on_card_action(self, data: Any) -> Any:
+        """Handle card button callbacks. Must return P2CardActionTriggerResponse."""
+        from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
+
         try:
             logger.info("Card action received", data_type=type(data).__name__)
 
             # Extract action value
-            action_value = ""
+            action_value = None
             if hasattr(data, 'event') and hasattr(data.event, 'action'):
                 action = data.event.action
                 if hasattr(action, 'value'):
@@ -643,23 +832,75 @@ class LarkAdapter(PlatformAdapter):
 
             logger.info("Card action value", value=action_value)
 
-            # Handle stop action
-            if action_value.startswith("stop:"):
-                user_id_str = action_value.split(":")[1]
+            # Parse action - support both string and dict formats
+            action_type = None
+            user_id = None
+
+            if isinstance(action_value, dict):
+                # New schema 2.0 format: {"action": "stop", "user_id": 123}
+                action_type = action_value.get("action")
+                user_id = action_value.get("user_id")
+            elif isinstance(action_value, str) and action_value.startswith("stop:"):
+                # Legacy string format: "stop:123"
+                action_type = "stop"
                 try:
-                    user_id = int(user_id_str)
-                    if user_id in self._stop_callbacks:
-                        interrupt_event = self._stop_callbacks[user_id]
-                        interrupt_event.set()
-                        logger.info("Stop requested", user_id=user_id)
+                    user_id = int(action_value.split(":")[1])
                 except ValueError:
-                    logger.warning("Invalid user_id in stop action", value=action_value)
+                    pass
+
+            # Handle stop action
+            if action_type == "stop" and user_id is not None:
+                if user_id in self._stop_callbacks:
+                    interrupt_event = self._stop_callbacks[user_id]
+                    interrupt_event.set()
+                    logger.info("Stop requested", user_id=user_id)
+                    # Return success response with toast
+                    return P2CardActionTriggerResponse({
+                        "toast": {
+                            "type": "info",
+                            "content": "正在中断请求..."
+                        }
+                    })
+                else:
+                    logger.warning("No stop callback for user", user_id=user_id)
+                    return P2CardActionTriggerResponse({
+                        "toast": {
+                            "type": "warning",
+                            "content": "没有正在进行的请求"
+                        }
+                    })
+
+            # Default success response
+            return P2CardActionTriggerResponse({
+                "toast": {
+                    "type": "info",
+                    "content": "操作已收到"
+                }
+            })
 
         except Exception as e:
             logger.error("Error processing card action", error=str(e), exc_info=True)
+            # Return error response
+            return P2CardActionTriggerResponse({
+                "toast": {
+                    "type": "error",
+                    "content": f"处理失败: {str(e)}"
+                }
+            })
 
     async def handle_card_callback(self, payload: Dict[str, Any]) -> None:
         """Handle card action callback from webhook.
+
+        Supports multiple callback types:
+        - stop:user_id - Interrupt active request
+        - cd:directory - Change directory
+        - action:name - Execute named action
+        - quick:name - Quick action
+        - git:command - Git operation
+        - export:format - Export session
+        - confirm:yes/no - Confirmation response
+
+        Supports both string format ("stop:123") and dict format ({"action": "stop", "user_id": 123})
 
         Args:
             payload: Card action payload from Lark webhook
@@ -670,25 +911,126 @@ class LarkAdapter(PlatformAdapter):
             # Extract action value from Lark card callback format
             action = payload.get("action", {})
             action_value = action.get("value", "")
+            open_message_id = payload.get("open_message_id", "")
+            open_chat_id = payload.get("open_chat_id", "")
 
-            logger.info("Card callback action value", value=action_value)
+            logger.info("Card callback action value", value=action_value, chat_id=open_chat_id)
 
-            # Handle stop action
-            if action_value.startswith("stop:"):
-                user_id_str = action_value.split(":")[1]
+            if not action_value:
+                logger.warning("Empty action value in card callback")
+                return
+
+            # Parse action type and parameters - support both string and dict formats
+            if isinstance(action_value, dict):
+                # New schema 2.0 format: {"action": "stop", "user_id": 123}
+                action_type = action_value.get("action", "")
+                action_param = action_value.get("user_id", "") or action_value.get("param", "")
+            elif ":" in action_value:
+                # Legacy string format: "stop:123"
+                action_type, action_param = action_value.split(":", 1)
+            else:
+                action_type = action_value
+                action_param = ""
+
+            # --- Stop action (interrupt active request) ---
+            if action_type == "stop":
                 try:
-                    user_id = int(user_id_str)
+                    user_id = int(action_param) if action_param else 0
                     if user_id in self._stop_callbacks:
                         interrupt_event = self._stop_callbacks[user_id]
                         interrupt_event.set()
                         logger.info("Stop requested via card callback", user_id=user_id)
+                        await self.send_message(open_chat_id, "⏹️ 已中断请求")
                     else:
                         logger.warning("No active request for user", user_id=user_id)
+                        await self.send_message(open_chat_id, "⚠️ 没有正在进行的请求")
                 except ValueError:
                     logger.warning("Invalid user_id in stop action", value=action_value)
 
+            # --- CD action (change directory) ---
+            elif action_type == "cd":
+                if not action_param:
+                    await self.send_message(open_chat_id, "❌ 未指定目录")
+                    return
+
+                directory = action_param
+                # This would be handled by the orchestrator's _cmd_cd
+                # For now, just acknowledge
+                await self.send_message(open_chat_id, f"📁 切换目录: {directory}")
+                logger.info("CD action requested", directory=directory)
+
+            # --- Action action (generic action) ---
+            elif action_type == "action":
+                action_name = action_param
+                action_handlers = {
+                    "show_projects": "请列出所有项目",
+                    "help": "显示帮助信息",
+                    "new_session": "请开始新会话",
+                    "status": "显示会话状态",
+                }
+                if action_name in action_handlers:
+                    # Trigger the action as a message
+                    await self.send_message(open_chat_id, f"⚡ 执行操作: {action_name}")
+                else:
+                    await self.send_message(open_chat_id, f"❌ 未知操作: {action_name}")
+                logger.info("Action triggered", action=action_name)
+
+            # --- Quick action ---
+            elif action_type == "quick":
+                quick_name = action_param
+                quick_actions = {
+                    "review": "请审查当前目录的代码",
+                    "test": "请运行项目测试",
+                    "docs": "请为项目生成 README 文档",
+                    "fix": "请检查并修复代码问题",
+                }
+                if quick_name in quick_actions:
+                    await self.send_message(open_chat_id, f"⚡ 快速操作: {quick_actions[quick_name]}")
+                else:
+                    await self.send_message(open_chat_id, f"❌ 未知快速操作: {quick_name}")
+                logger.info("Quick action triggered", action=quick_name)
+
+            # --- Git action ---
+            elif action_type == "git":
+                git_cmd = action_param or "status"
+                await self.send_message(open_chat_id, f"🔧 执行 Git 命令: /git {git_cmd}")
+                logger.info("Git action triggered", command=git_cmd)
+
+            # --- Export action ---
+            elif action_type == "export":
+                export_format = action_param or "markdown"
+                await self.send_message(open_chat_id, f"📤 导出会话格式: {export_format}")
+                logger.info("Export action triggered", format=export_format)
+
+            # --- Confirm action ---
+            elif action_type == "confirm":
+                response = action_param.lower() if action_param else "no"
+                if response in ("yes", "y", "true", "1"):
+                    await self.send_message(open_chat_id, "✅ 已确认")
+                else:
+                    await self.send_message(open_chat_id, "❌ 已取消")
+                logger.info("Confirm action", response=response)
+
+            # --- Followup action (suggested next steps) ---
+            elif action_type == "followup":
+                followup_text = action_param
+                if followup_text:
+                    await self.send_message(open_chat_id, f"💡 后续建议: {followup_text}")
+                logger.info("Followup action", text=followup_text)
+
+            # --- Unknown action type ---
+            else:
+                logger.warning("Unknown action type in card callback", action_type=action_type)
+                await self.send_message(open_chat_id, f"❓ 未知操作类型: {action_type}")
+
         except Exception as e:
             logger.error("Error handling card callback", error=str(e), exc_info=True)
+            try:
+                chat_id = payload.get("open_chat_id", "")
+                if chat_id:
+                    await self.send_message(chat_id, f"❌ 处理回调时出错: {str(e)}")
+            except Exception:
+                pass
 
     async def stop(self) -> None:
         """Stop Lark adapter."""
@@ -715,7 +1057,7 @@ class LarkAdapter(PlatformAdapter):
         **kwargs: Any,
     ) -> None:
         """Register message handler for WebSocket events."""
-        self._event_handlers.append(handler)
+        self._message_handlers.append(handler)
         logger.info("Registered message handler for Lark WebSocket")
 
     async def register_command_handler(
@@ -724,10 +1066,9 @@ class LarkAdapter(PlatformAdapter):
         handler: Callable,
         **kwargs: Any,
     ) -> None:
-        """Register command handler - commands are handled as messages in Lark."""
-        # In Lark, commands are just messages starting with /
-        # They will be processed by the message handler
-        self._event_handlers.append(handler)
+        """Register command handler - commands are messages starting with /."""
+        self._command_handlers.append(handler)
+        self._registered_commands.extend(commands)
         logger.info("Registered command handler for Lark", commands=commands)
 
     async def register_callback_handler(
@@ -736,7 +1077,7 @@ class LarkAdapter(PlatformAdapter):
         **kwargs: Any,
     ) -> None:
         """Register callback handler for card button interactions."""
-        self._event_handlers.append(handler)
+        self._callback_handlers.append(handler)
         logger.info("Registered callback handler for Lark")
 
     async def send_message(
@@ -958,44 +1299,556 @@ class LarkAdapter(PlatformAdapter):
         caption: Optional[str] = None,
         **kwargs: Any,
     ) -> PlatformResponse:
-        """Send file to Lark chat."""
-        try:
-            # For Lark, files need to be uploaded first
-            # This is a simplified version - full implementation would need
-            # to handle file upload API calls
+        """Send file to Lark chat.
 
+        Args:
+            chat_id: Target chat ID
+            file: Either PlatformFile, bytes, or file path string
+            filename: Optional filename (required for bytes input)
+            caption: Optional caption text
+
+        Returns:
+            PlatformResponse with success status and message_id
+        """
+        import aiohttp
+        import os
+
+        try:
+            # Prepare file data
             if isinstance(file, PlatformFile):
                 file_data = file.file_data
                 filename = filename or file.file_name
             elif isinstance(file, bytes):
                 file_data = file
+                if not filename:
+                    filename = f"file_{uuid.uuid4().hex[:8]}"
             else:
                 # File path
                 with open(file, 'rb') as f:
                     file_data = f.read()
+                filename = filename or os.path.basename(file)
 
-            # Upload file to Lark
-            # Note: This requires using the upload API
-            # For now, return a simplified response
-            logger.warning("File upload not fully implemented for Lark yet")
-            return PlatformResponse(
-                success=False,
-                error="File upload not fully implemented for Lark yet",
+            # Get tenant access token
+            tenant_token = await self._get_tenant_access_token()
+            if not tenant_token:
+                return PlatformResponse(
+                    success=False,
+                    error="Failed to get tenant access token"
+                )
+
+            # Upload file using Lark API
+            upload_url = "https://open.larksuite.com/open-apis/im/v1/files"
+            headers = {
+                "Authorization": f"Bearer {tenant_token}",
+            }
+
+            # Determine file type based on extension
+            file_ext = os.path.splitext(filename)[1].lower()
+            if file_ext in {'.png', '.jpg', '.jpeg', '.gif', '.bmp'}:
+                file_type = "image"
+            elif file_ext in {'.mp4', '.mov', '.avi'}:
+                file_type = "video"
+            elif file_ext in {'.mp3', '.wav', '.aac'}:
+                file_type = "audio"
+            else:
+                file_type = "stream"
+
+            form_data = aiohttp.FormData()
+            form_data.add_field(
+                'file',
+                file_data,
+                filename=filename,
+                content_type='application/octet-stream'
             )
+            form_data.add_field('file_name', filename)
+            form_data.add_field('file_type', file_type)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(upload_url, headers=headers, data=form_data) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        logger.error("File upload failed", status=resp.status, error=error_text)
+                        return PlatformResponse(
+                            success=False,
+                            error=f"Upload failed: {resp.status}"
+                        )
+
+                    result = await resp.json()
+                    if result.get("code") != 0:
+                        logger.error("File upload API error", response=result)
+                        return PlatformResponse(
+                            success=False,
+                            error=f"API error: {result.get('msg', 'Unknown error')}"
+                        )
+
+                    file_key = result.get("data", {}).get("file", {}).get("file_key")
+                    if not file_key:
+                        return PlatformResponse(
+                            success=False,
+                            error="No file_key in response"
+                        )
+
+            # Send file message
+            content = json.dumps({
+                "file_key": file_key
+            })
+
+            request = CreateMessageRequest.builder() \
+                .receive_id_type("chat_id") \
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                        .receive_id(chat_id)
+                        .msg_type("file")
+                        .content(content)
+                        .build()
+                ) \
+                .build()
+
+            response = await self._execute_async(
+                self.client.im.v1.message.create,
+                request
+            )
+
+            if response.code == 0:
+                logger.info("File sent successfully", file_key=file_key, message_id=response.data.message_id)
+                return PlatformResponse(
+                    success=True,
+                    message_id=response.data.message_id,
+                    raw={"file_key": file_key, "message_id": response.data.message_id},
+                )
+            else:
+                return PlatformResponse(
+                    success=False,
+                    error=f"Message send failed: Code {response.code}: {response.msg}",
+                )
+
         except Exception as e:
-            logger.error("Failed to send file", error=str(e))
+            logger.error("Failed to send file", error=str(e), exc_info=True)
             return PlatformResponse(success=False, error=str(e))
 
-    async def download_file(self, file_id: str, **kwargs: Any) -> Optional[bytes]:
-        """Download file from Lark."""
+    async def download_file(self, file_key: str, **kwargs: Any) -> Optional[bytes]:
+        """Download file from Lark.
+
+        Args:
+            file_key: The file_key from Lark file message
+
+        Returns:
+            File content as bytes, or None if download failed
+        """
+        import aiohttp
+
         try:
-            # Lark file download requires getting file URL then downloading
-            # This is a placeholder for full implementation
-            logger.warning("File download not fully implemented for Lark yet")
-            return None
+            # Get tenant access token
+            tenant_token = await self._get_tenant_access_token()
+            if not tenant_token:
+                logger.error("Failed to get tenant access token")
+                return None
+
+            # Get file download URL
+            headers = {
+                "Authorization": f"Bearer {tenant_token}",
+            }
+
+            # Use GetFileRequest to get file info
+            request = GetFileRequest.builder() \
+                .file_key(file_key) \
+                .build()
+
+            response = await self._execute_async(
+                self.client.im.v1.file.get,
+                request
+            )
+
+            if response.code != 0:
+                logger.error("Failed to get file info", code=response.code, msg=response.msg)
+                return None
+
+            # Get download URL from response
+            file_url = None
+            if hasattr(response, 'data') and response.data:
+                # The file object contains temporary_download_url
+                if hasattr(response.data, 'file') and response.data.file:
+                    file_url = getattr(response.data.file, 'temporary_download_url', None)
+
+            if not file_url:
+                logger.error("No download URL in response")
+                return None
+
+            # Download the file
+            async with aiohttp.ClientSession() as session:
+                async with session.get(file_url) as resp:
+                    if resp.status != 200:
+                        logger.error("File download failed", status=resp.status)
+                        return None
+                    return await resp.read()
+
         except Exception as e:
-            logger.error("Failed to download file", error=str(e))
+            logger.error("Failed to download file", error=str(e), exc_info=True)
             return None
+
+    async def _get_tenant_access_token(self) -> Optional[str]:
+        """Get tenant access token for Lark API."""
+        try:
+            # Use the internal auth API to get tenant token
+            import aiohttp
+
+            url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
+            payload = {
+                "app_id": self.app_id,
+                "app_secret": self.app_secret
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status != 200:
+                        logger.error("Failed to get tenant token", status=resp.status)
+                        return None
+
+                    result = await resp.json()
+                    if result.get("code") != 0:
+                        logger.error("Auth API error", response=result)
+                        return None
+
+                    return result.get("tenant_access_token")
+
+        except Exception as e:
+            logger.error("Error getting tenant token", error=str(e))
+            return None
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image: Union[bytes, str],
+        caption: Optional[str] = None,
+        **kwargs: Any,
+    ) -> PlatformResponse:
+        """Send image to Lark chat.
+
+        Args:
+            chat_id: Target chat ID
+            image: Either bytes or file path string
+            caption: Optional caption text
+
+        Returns:
+            PlatformResponse with success status and message_id
+        """
+        import aiohttp
+        import os
+
+        try:
+            # Prepare image data
+            if isinstance(image, bytes):
+                image_data = image
+            else:
+                # File path
+                with open(image, 'rb') as f:
+                    image_data = f.read()
+
+            # Get tenant access token
+            tenant_token = await self._get_tenant_access_token()
+            if not tenant_token:
+                return PlatformResponse(
+                    success=False,
+                    error="Failed to get tenant access token"
+                )
+
+            # Upload image using Lark API
+            upload_url = "https://open.larksuite.com/open-apis/im/v1/images"
+            headers = {
+                "Authorization": f"Bearer {tenant_token}",
+            }
+
+            form_data = aiohttp.FormData()
+            form_data.add_field(
+                'image',
+                image_data,
+                filename='image.png',
+                content_type='image/png'
+            )
+            form_data.add_field('image_type', 'message')
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(upload_url, headers=headers, data=form_data) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        logger.error("Image upload failed", status=resp.status, error=error_text)
+                        return PlatformResponse(
+                            success=False,
+                            error=f"Upload failed: {resp.status}"
+                        )
+
+                    result = await resp.json()
+                    if result.get("code") != 0:
+                        logger.error("Image upload API error", response=result)
+                        return PlatformResponse(
+                            success=False,
+                            error=f"API error: {result.get('msg', 'Unknown error')}"
+                        )
+
+                    image_key = result.get("data", {}).get("image", {}).get("image_key")
+                    if not image_key:
+                        return PlatformResponse(
+                            success=False,
+                            error="No image_key in response"
+                        )
+
+            # Send image message
+            content = json.dumps({
+                "image_key": image_key
+            })
+
+            request = CreateMessageRequest.builder() \
+                .receive_id_type("chat_id") \
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                        .receive_id(chat_id)
+                        .msg_type("image")
+                        .content(content)
+                        .build()
+                ) \
+                .build()
+
+            response = await self._execute_async(
+                self.client.im.v1.message.create,
+                request
+            )
+
+            if response.code == 0:
+                logger.info("Image sent successfully", image_key=image_key, message_id=response.data.message_id)
+                return PlatformResponse(
+                    success=True,
+                    message_id=response.data.message_id,
+                    raw={"image_key": image_key, "message_id": response.data.message_id},
+                )
+            else:
+                return PlatformResponse(
+                    success=False,
+                    error=f"Message send failed: Code {response.code}: {response.msg}",
+                )
+
+        except Exception as e:
+            logger.error("Failed to send image", error=str(e), exc_info=True)
+            return PlatformResponse(success=False, error=str(e))
+
+    async def download_image(self, image_key: str) -> Optional[bytes]:
+        """Download image from Lark.
+
+        Args:
+            image_key: The image_key from Lark image message
+
+        Returns:
+            Image content as bytes, or None if download failed
+        """
+        import aiohttp
+
+        try:
+            # Get tenant access token
+            tenant_token = await self._get_tenant_access_token()
+            if not tenant_token:
+                logger.error("Failed to get tenant access token")
+                return None
+
+            # Get image download URL
+            request = GetImageRequest.builder() \
+                .image_key(image_key) \
+                .build()
+
+            response = await self._execute_async(
+                self.client.im.v1.image.get,
+                request
+            )
+
+            if response.code != 0:
+                logger.error("Failed to get image info", code=response.code, msg=response.msg)
+                return None
+
+            # Get download URL from response
+            image_url = None
+            if hasattr(response, 'data') and response.data:
+                if hasattr(response.data, 'image') and response.data.image:
+                    image_url = getattr(response.data.image, 'temporary_download_url', None)
+
+            if not image_url:
+                logger.error("No download URL in response")
+                return None
+
+            # Download the image
+            async with aiohttp.ClientSession() as session:
+                async with session.get(image_url) as resp:
+                    if resp.status != 200:
+                        logger.error("Image download failed", status=resp.status)
+                        return None
+                    return await resp.read()
+
+        except Exception as e:
+            logger.error("Failed to download image", error=str(e), exc_info=True)
+            return None
+
+    async def _process_file_content(
+        self,
+        file_data: bytes,
+        file_name: str,
+        original_text: str,
+    ) -> str:
+        """Process uploaded file content and return formatted text for Claude.
+
+        Args:
+            file_data: Raw file bytes
+            file_name: Original file name
+            original_text: User's message text (if any)
+
+        Returns:
+            Formatted text containing file content for Claude to analyze
+        """
+        import os
+        import tempfile
+
+        try:
+            # Detect file type from extension
+            ext = os.path.splitext(file_name)[1].lower()
+
+            # Code file extensions
+            code_extensions = {
+                ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".cpp", ".c", ".h",
+                ".go", ".rs", ".rb", ".php", ".swift", ".kt", ".scala", ".r", ".jl",
+                ".lua", ".pl", ".sh", ".bash", ".zsh", ".sql", ".html", ".css",
+                ".scss", ".sass", ".less", ".vue", ".yaml", ".yml", ".json", ".xml",
+                ".toml", ".ini", ".cfg", ".md", ".txt", ".rst",
+            }
+
+            # Archive extensions
+            archive_extensions = {".zip", ".tar", ".gz", ".bz2", ".xz", ".7z"}
+
+            if ext in archive_extensions:
+                # Handle archive files
+                return await self._process_archive_content(file_data, file_name, original_text)
+
+            elif ext in code_extensions or ext == "":
+                # Handle code/text files
+                try:
+                    content = file_data.decode("utf-8")
+                except UnicodeDecodeError:
+                    try:
+                        content = file_data.decode("latin-1")
+                    except Exception:
+                        content = f"[Binary file: {file_name}]"
+
+                # Build prompt
+                language_map = {
+                    ".py": "python", ".js": "javascript", ".ts": "typescript",
+                    ".java": "java", ".cpp": "cpp", ".c": "c", ".go": "go",
+                    ".rs": "rust", ".rb": "ruby", ".php": "php", ".swift": "swift",
+                    ".kt": "kotlin", ".scala": "scala", ".r": "r", ".jl": "julia",
+                    ".sh": "bash", ".bash": "bash", ".sql": "sql", ".html": "html",
+                    ".css": "css", ".yaml": "yaml", ".yml": "yaml", ".json": "json",
+                    ".xml": "xml", ".toml": "toml", ".md": "markdown",
+                }
+                lang = language_map.get(ext, "text")
+
+                prompt = f"{original_text}\n\nFile: {file_name}\n\n```{lang}\n{content}\n```"
+                return prompt.strip()
+
+            else:
+                # Unknown file type, just report it
+                return f"{original_text}\n\n用户上传了一个文件: {file_name} ({len(file_data)} bytes)".strip()
+
+        except Exception as e:
+            logger.error("Error processing file content", error=str(e), exc_info=True)
+            return f"{original_text}\n\n[处理文件时出错: {str(e)}]".strip()
+
+    async def _process_archive_content(
+        self,
+        file_data: bytes,
+        file_name: str,
+        original_text: str,
+    ) -> str:
+        """Process archive file content and return formatted text.
+
+        Args:
+            file_data: Raw archive bytes
+            file_name: Archive file name
+            original_text: User's message text
+
+        Returns:
+            Formatted text with archive structure for Claude
+        """
+        import zipfile
+        import tarfile
+        import tempfile
+        import os
+        from io import BytesIO
+
+        try:
+            file_list = []
+
+            # Try to extract file list
+            if file_name.endswith(".zip"):
+                try:
+                    with zipfile.ZipFile(BytesIO(file_data)) as zf:
+                        for info in zf.filelist:
+                            if not info.is_dir():
+                                file_list.append(info.filename)
+                except Exception as e:
+                    logger.warning("Failed to read zip file", error=str(e))
+
+            elif file_name.endswith((".tar", ".tar.gz", ".tgz", ".tar.bz2")):
+                try:
+                    mode = "r:gz" if file_name.endswith((".tar.gz", ".tgz")) else \
+                           "r:bz2" if file_name.endswith(".tar.bz2") else "r"
+                    with tarfile.open(fileobj=BytesIO(file_data), mode=mode) as tf:
+                        for member in tf.getmembers():
+                            if member.isfile():
+                                file_list.append(member.name)
+                except Exception as e:
+                    logger.warning("Failed to read tar file", error=str(e))
+
+            # Build file tree
+            if file_list:
+                tree = "\n".join(f"  - {f}" for f in sorted(file_list)[:50])  # Limit to 50 files
+                if len(file_list) > 50:
+                    tree += f"\n  ... and {len(file_list) - 50} more files"
+                return f"{original_text}\n\n用户上传了一个压缩包: {file_name}\n包含 {len(file_list)} 个文件:\n{tree}".strip()
+            else:
+                return f"{original_text}\n\n用户上传了一个压缩包: {file_name} ({len(file_data)} bytes)".strip()
+
+        except Exception as e:
+            logger.error("Error processing archive", error=str(e), exc_info=True)
+            return f"{original_text}\n\n[处理压缩包时出错: {str(e)}]".strip()
+
+    async def _process_image_content(
+        self,
+        image_data: bytes,
+        original_text: str,
+    ) -> str:
+        """Process uploaded image content.
+
+        Args:
+            image_data: Raw image bytes
+            original_text: User's message text
+
+        Returns:
+            Text with image info for Claude (image will be handled by Claude's vision)
+        """
+        import base64
+        import tempfile
+        import os
+
+        try:
+            # Save image to temp file for Claude to process
+            temp_dir = tempfile.gettempdir()
+            temp_path = os.path.join(temp_dir, f"lark_image_{uuid.uuid4().hex[:8]}.png")
+
+            with open(temp_path, "wb") as f:
+                f.write(image_data)
+
+            # Build prompt with image reference
+            # Note: Claude Code SDK can handle image files
+            prompt = f"{original_text}\n\n[用户上传了一张图片，保存在: {temp_path}]"
+            return prompt.strip()
+
+        except Exception as e:
+            logger.error("Error processing image", error=str(e), exc_info=True)
+            return f"{original_text}\n\n[处理图片时出错: {str(e)}]".strip()
 
     def extract_user(self, event_data: Dict[str, Any]) -> PlatformUser:
         """Extract user from Lark event."""

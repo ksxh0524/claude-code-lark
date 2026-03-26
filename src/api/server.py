@@ -4,12 +4,14 @@ Runs in the same process as the bot, sharing the event loop.
 Receives external webhooks and publishes them as events on the bus.
 """
 
+import asyncio
 import json
 import uuid
 from typing import Any, Dict, Optional
 
 import structlog
 from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 
 from ..config.settings import Settings
 from ..events.bus import EventBus
@@ -78,13 +80,17 @@ def create_api_app(
         )
         await event_bus.publish(event)
 
-        return Response(content="ok", media_type="text/plain")
+        return JSONResponse(content={"code": 0, "msg": "success"})
 
     @app.post("/lark/card")
     async def receive_lark_card_callback(
         request: Request,
-    ) -> Response:
-        """Receive card action callbacks from Lark/Feishu."""
+    ) -> JSONResponse:
+        """Receive card action callbacks from Lark/Feishu.
+
+        Must return JSON response within 3 seconds:
+        {"code": 0, "msg": "success"} or with toast/card updates.
+        """
         body = await request.body()
 
         try:
@@ -97,16 +103,18 @@ def create_api_app(
             payload=payload,
         )
 
-        # Publish to event bus for handling
+        # Publish to event bus for handling (async, non-blocking)
         event = WebhookEvent(
             provider="lark",
             event_type_name="card.action.trigger",
             payload=payload,
             delivery_id=str(uuid.uuid4()),
         )
-        await event_bus.publish(event)
+        # Use create_task to avoid blocking the response
+        asyncio.create_task(event_bus.publish(event))
 
-        return Response(content="ok", media_type="text/plain")
+        # Return immediately with proper JSON format (required by Lark)
+        return JSONResponse(content={"code": 0, "msg": "success"})
 
     @app.post("/webhooks/{provider}")
     async def receive_webhook(
