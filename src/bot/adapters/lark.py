@@ -333,7 +333,7 @@ class LarkAdapter(PlatformAdapter):
             try:
                 while timer_running[0] and not interrupt_event.is_set():
                     elapsed = time.time() - start_time
-                    await self._update_card_subtitle(card_id, f"Processing... {elapsed:.0f}s")
+                    await self._update_card_subtitle(card_id, f"处理中... {elapsed:.0f}s")
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 pass
@@ -381,12 +381,18 @@ class LarkAdapter(PlatformAdapter):
                 pass
 
             elapsed = time.time() - start_time
-            status = "Done" if response.success else ("Interrupted" if response.interrupted else "Error")
+            # Chinese status messages
+            if response.success:
+                status = "完成"
+            elif response.interrupted:
+                status = "已中断"
+            else:
+                status = "出错"
 
             # Always use response.content as final text (it's complete)
             final_text = response.content if response.content else full_content[0]
             if response.interrupted:
-                final_text += "\n\n_(Interrupted)_"
+                final_text += "\n\n_(用户中断)_"
 
             logger.info("Final response", content_len=len(final_text), response_len=len(response.content or ""))
 
@@ -400,7 +406,7 @@ class LarkAdapter(PlatformAdapter):
             timer_running[0] = False
             timer_task_handle.cancel()
             elapsed = time.time() - start_time
-            await self._update_card_subtitle(card_id, f"Cancelled · {elapsed:.1f}s")
+            await self._update_card_subtitle(card_id, f"已取消 · {elapsed:.1f}s")
             await self._update_card_content(card_id, "请求已取消", update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
@@ -409,7 +415,7 @@ class LarkAdapter(PlatformAdapter):
             timer_task_handle.cancel()
             logger.error("Error", error=str(e), exc_info=True)
             elapsed = time.time() - start_time
-            await self._update_card_subtitle(card_id, f"Error · {elapsed:.1f}s")
+            await self._update_card_subtitle(card_id, f"出错 · {elapsed:.1f}s")
             await self._update_card_content(card_id, str(e), update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
@@ -572,9 +578,9 @@ class LarkAdapter(PlatformAdapter):
             return False
 
     async def _update_card_subtitle(self, card_id: str, subtitle: str) -> bool:
-        """Update card header subtitle via PATCH API.
+        """Update card header subtitle via cardkit API.
 
-        Uses im.message.patch to update the card's header subtitle.
+        Uses cardkit.card.update to update the card's header subtitle.
         This is separate from content streaming updates.
         """
         try:
@@ -588,7 +594,6 @@ class LarkAdapter(PlatformAdapter):
                 }
             }
 
-            # Use cardkit card.update API to update the card
             from lark_oapi.api.cardkit.v1 import (
                 UpdateCardRequest,
                 UpdateCardRequestBody,
@@ -598,8 +603,7 @@ class LarkAdapter(PlatformAdapter):
                 .card_id(card_id) \
                 .request_body(
                     UpdateCardRequestBody.builder()
-                        .type("card_json")
-                        .data(json.dumps(card_json))
+                        .card(card_json)  # Use card() not type()/data()
                         .uuid(str(uuid.uuid4()))
                         .build()
                 ).build()
@@ -609,12 +613,12 @@ class LarkAdapter(PlatformAdapter):
             )
 
             if response.code != 0:
-                logger.warning("Card subtitle update failed", code=response.code)
+                logger.warning("Card subtitle update failed", code=response.code, msg=response.msg)
                 return False
             return True
 
         except Exception as e:
-            logger.error("Error updating card content", error=str(e))
+            logger.error("Error updating card subtitle", error=str(e))
             return False
 
     async def _close_streaming_mode(self, card_id: str, sequence: int) -> bool:
