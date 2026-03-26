@@ -321,26 +321,16 @@ class LarkAdapter(PlatformAdapter):
 
         # Track content and update state
         full_content = [""]
-        update_sequence = [0]
-        timer_sequence = [0]  # Separate sequence for timer updates
+        update_sequence = [1]  # Start from 1 (0 might fail - card not ready)
         last_update_time = [0.0]  # Track last update time for throttling
-        timer_running = [True]  # Control timer task
 
-        # Wait briefly for card to be ready before first update
-        await asyncio.sleep(0.2)
+        # Wait for card to be ready before first update (1s to ensure card is fully created)
+        await asyncio.sleep(1.0)
 
-        # Timer task - updates timer element with elapsed time every second
-        async def timer_task():
-            try:
-                while timer_running[0] and not interrupt_event.is_set():
-                    elapsed = time.time() - start_time
-                    await self._update_card_timer(card_id, f"⏱ 处理中... {elapsed:.0f}s", timer_sequence[0])
-                    timer_sequence[0] += 1
-                    await asyncio.sleep(1.0)
-            except asyncio.CancelledError:
-                pass
-
-        timer_task_handle = asyncio.create_task(timer_task())
+        # Helper to format content with timer/status prefix
+        def format_with_status(content: str, status: str, elapsed: float) -> str:
+            """Format content with status header."""
+            return f"**{status} · {elapsed:.0f}s**\n\n{content}"
 
         # Stream callback - accumulates content with throttled updates
         async def on_stream(event: StreamEvent) -> None:
@@ -364,7 +354,9 @@ class LarkAdapter(PlatformAdapter):
             if content_changed:
                 now = time.time()
                 if now - last_update_time[0] >= 0.15:
-                    await self._update_card_content(card_id, full_content[0] or "Thinking...", update_sequence[0])
+                    elapsed = now - start_time
+                    display = format_with_status(full_content[0] or "Thinking...", "⏱ 处理中...", elapsed)
+                    await self._update_card_content(card_id, display, update_sequence[0])
                     update_sequence[0] += 1
                     last_update_time[0] = now
 
@@ -375,21 +367,14 @@ class LarkAdapter(PlatformAdapter):
                 ctx, on_stream, interrupt_event=interrupt_event
             )
 
-            # Stop timer task
-            timer_running[0] = False
-            try:
-                await asyncio.wait_for(timer_task_handle, timeout=2.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
-
             elapsed = time.time() - start_time
             # Chinese status messages
             if response.success:
-                status = "完成"
+                status = "✅ 完成"
             elif response.interrupted:
-                status = "已中断"
+                status = "⏹ 用户中断"
             else:
-                status = "出错"
+                status = "❌ 出错"
 
             # Always use response.content as final text (it's complete)
             final_text = response.content if response.content else full_content[0]
@@ -398,28 +383,22 @@ class LarkAdapter(PlatformAdapter):
 
             logger.info("Final response", content_len=len(final_text), response_len=len(response.content or ""))
 
-            # Final update with status in timer element
-            await self._update_card_timer(card_id, f"✅ {status} · {elapsed:.1f}s", timer_sequence[0])
-            timer_sequence[0] += 1
-            final_content = final_text
-            await self._update_card_content(card_id, final_content, update_sequence[0])
+            # Final update with status
+            final_display = format_with_status(final_text, status, elapsed)
+            await self._update_card_content(card_id, final_display, update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
         except asyncio.CancelledError:
-            timer_running[0] = False
-            timer_task_handle.cancel()
             elapsed = time.time() - start_time
-            await self._update_card_timer(card_id, f"❌ 已取消 · {elapsed:.1f}s", timer_sequence[0])
-            await self._update_card_content(card_id, "请求已取消", update_sequence[0])
+            final_display = format_with_status("请求已中断", "⏹ 用户中断", elapsed)
+            await self._update_card_content(card_id, final_display, update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
         except Exception as e:
-            timer_running[0] = False
-            timer_task_handle.cancel()
             logger.error("Error", error=str(e), exc_info=True)
             elapsed = time.time() - start_time
-            await self._update_card_timer(card_id, f"❌ 出错 · {elapsed:.1f}s", timer_sequence[0])
-            await self._update_card_content(card_id, str(e), update_sequence[0])
+            final_display = format_with_status(str(e), "❌ 出错", elapsed)
+            await self._update_card_content(card_id, final_display, update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
         finally:
@@ -446,39 +425,27 @@ class LarkAdapter(PlatformAdapter):
             # Schema 2.0: button goes directly in elements, not in "action" container
             # Use behaviors with type "callback" for button click handling
             # Pattern based on OpenClaw's STREAMING_THINKING_CARD
+            #
+            # NOTE: We combine timer and content into ONE element because
+            # the card_element.content API (error 300317) doesn't work reliably
+            # for separate markdown elements. One combined element is simpler.
             card_json = {
                 "schema": "2.0",
                 "header": {
                     "title": {"content": "Claude Code", "tag": "plain_text"},
-                    "subtitle": {"content": "Processing...", "tag": "plain_text"},
                     "template": "blue"
                 },
                 "config": {
-                    "streaming_mode": True,
-                    "streaming_config": {
-                        "print_frequency_ms": {"default": 50},
-                        "print_step": {"default": 2},
-                        "print_strategy": "fast"
-                    },
-                    # Summary shown in notification/feed during processing
-                    "summary": {
-                        "content": "Processing...",
-                        "i18n_content": {"zh_cn": "处理中...", "en_us": "Processing..."}
-                    }
+                    "wide_screen_mode": True,
+                    "streaming_mode": True
                 },
                 "body": {
                     "elements": [
-                        # Timer element showing elapsed time
+                        # Combined timer + content element
+                        # Timer is included in content, updated together
                         {
                             "tag": "markdown",
-                            "content": "⏱ 处理中... 0s",
-                            "element_id": "timer_element",
-                            "text_size": "notation"
-                        },
-                        # Main content element for streaming updates
-                        {
-                            "tag": "markdown",
-                            "content": "Thinking...",
+                            "content": "⏱ 处理中... 0s\n\nThinking...",
                             "element_id": "content_element",
                             "text_align": "left",
                             "text_size": "normal_v2"
@@ -618,11 +585,18 @@ class LarkAdapter(PlatformAdapter):
             logger.error("Error updating timer", error=str(e))
             return False
 
-    async def _update_card_subtitle(self, card_id: str, subtitle: str) -> bool:
-        """Update card header subtitle via cardkit API.
+    async def _update_card_subtitle(
+        self, card_id: str, subtitle: str, template: str = "blue"
+    ) -> bool:
+        """Update card header subtitle and color via cardkit API.
 
         Uses cardkit.card.update to update the card's header subtitle.
-        This is separate from content streaming updates.
+        This must be called AFTER streaming mode is closed.
+
+        Args:
+            card_id: Card ID to update
+            subtitle: New subtitle text (e.g., "Done · 31.0s")
+            template: Header color template (blue/green/red/yellow)
         """
         try:
             # Build card with just header update
@@ -631,7 +605,7 @@ class LarkAdapter(PlatformAdapter):
                 "header": {
                     "title": {"content": "Claude Code", "tag": "plain_text"},
                     "subtitle": {"content": subtitle, "tag": "plain_text"},
-                    "template": "blue"
+                    "template": template
                 }
             }
 
@@ -663,25 +637,25 @@ class LarkAdapter(PlatformAdapter):
             return False
 
     async def _close_streaming_mode(self, card_id: str, sequence: int) -> bool:
-        """Close streaming mode and remove the stop button and timer element."""
+        """Close streaming mode and remove the stop button and loading icon.
+
+        Keeps the timer element to show final status/time.
+        """
         try:
-            # First, delete the timer element
-            await self._delete_card_element(card_id, "timer_element", sequence)
+            # Delete the loading icon element
+            await self._delete_card_element(card_id, "loading_icon", sequence)
 
-            # Then, delete the loading icon element
-            await self._delete_card_element(card_id, "loading_icon", sequence + 1)
+            # Delete the stop button element
+            await self._delete_card_element(card_id, "stop_button", sequence + 1)
 
-            # Then, delete the stop button element
-            await self._delete_card_element(card_id, "stop_button", sequence + 2)
-
-            # Finally close streaming mode (sequence + 3 for next operation)
+            # Close streaming mode (sequence + 2 for next operation)
             settings_request = SettingsCardRequest.builder() \
                 .card_id(card_id) \
                 .request_body(
                     SettingsCardRequestBody.builder()
                         .settings(json.dumps({"config": {"streaming_mode": False}}))
                         .uuid(str(uuid.uuid4()))
-                        .sequence(sequence + 3)
+                        .sequence(sequence + 2)
                         .build()
                 ).build()
 
@@ -1252,7 +1226,7 @@ class LarkAdapter(PlatformAdapter):
             # Extract emoji icon from the beginning
             if text and len(text) > 2:
                 first_char = text[0]
-                if first_char in "👋🆕📊📁📄✅❌⚠️💡⚡💰📍🔧📤":
+                if first_char in "👋🆕📊📁📄✅❌⚠️💡⚡💰📍🔧📤🔄ℹ️🏁🧵📋🌳🚫🎯":
                     icon = first_char
                     # Find title (first line after icon)
                     rest = text[1:].strip()

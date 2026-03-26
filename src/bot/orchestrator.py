@@ -314,7 +314,7 @@ class MessageOrchestrator:
         """Register agentic handlers: commands + text/file/photo."""
         from .handlers import command
 
-        # Commands
+        # Commands - include both agentic and utility commands
         handlers = [
             ("start", self.agentic_start),
             ("new", self.agentic_new),
@@ -322,6 +322,16 @@ class MessageOrchestrator:
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
             ("restart", command.restart_command),
+            # Utility commands for file/directory operations
+            ("ls", self._cmd_ls_handler),
+            ("cd", self._cmd_cd_handler),
+            ("pwd", self._cmd_pwd_handler),
+            ("projects", self._cmd_projects_handler),
+            ("export", self._cmd_export_handler),
+            ("actions", self._cmd_actions_handler),
+            ("git", self._cmd_git_handler),
+            ("list", self._cmd_list_handler),
+            ("help", self._cmd_help_handler),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -454,6 +464,15 @@ class MessageOrchestrator:
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("repo", "List repos / switch workspace"),
+                BotCommand("ls", "List files in current directory"),
+                BotCommand("cd", "Change directory"),
+                BotCommand("pwd", "Show current directory"),
+                BotCommand("projects", "Show all projects"),
+                BotCommand("export", "Export current session"),
+                BotCommand("actions", "Show quick actions"),
+                BotCommand("git", "Git repository commands"),
+                BotCommand("list", "Show all available commands"),
+                BotCommand("help", "Show help"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -2433,12 +2452,90 @@ class MessageOrchestrator:
         )
         await adapter.send_message(chat_id, commands_list)
 
-    async def handle_callback(self, event_data: Dict[str, Any]) -> None:
-        """Handle callback from Lark platform (button clicks)."""
-        import structlog
-        logger = structlog.get_logger()
+    # --- Telegram Handler Wrappers for Utility Commands ---
+    # These methods adapt Telegram handler signatures to the existing command implementations
 
-        logger.info("Lark callback received", event_data=event_data)
+    async def _cmd_ls_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /ls command in agentic mode (Telegram)."""
+        from .handlers import command
+        await command.list_files(update, context)
+
+    async def _cmd_cd_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /cd command in agentic mode (Telegram)."""
+        from .handlers import command
+        await command.change_directory(update, context)
+
+    async def _cmd_pwd_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /pwd command in agentic mode (Telegram)."""
+        from .handlers import command
+        await command.print_working_directory(update, context)
+
+    async def _cmd_projects_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /projects command in agentic mode (Telegram)."""
+        from .handlers import command
+        await command.show_projects(update, context)
+
+    async def _cmd_export_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /export command in agentic mode (Telegram)."""
+        from .handlers import command
+        await command.export_session(update, context)
+
+    async def _cmd_actions_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /actions command in agentic mode (Telegram)."""
+        from .handlers import command
+        await command.quick_actions(update, context)
+
+    async def _cmd_git_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /git command in agentic mode (Telegram)."""
+        from .handlers import command
+        await command.git_command(update, context)
+
+    async def _cmd_list_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /list command in agentic mode (Telegram)."""
+        # Show all available commands
+        commands_text = (
+            "📋 <b>所有可用命令</b>\n\n"
+            "<b>会话管理:</b>\n"
+            "• /start - 开始使用机器人\n"
+            "• /new - 开始新会话\n"
+            "• /status - 查看会话状态\n"
+            "• /verbose [0|1|2] - 设置输出详细程度\n\n"
+            "<b>目录导航:</b>\n"
+            "• /ls - 列出文件\n"
+            "• /cd &lt;dir&gt; - 切换目录\n"
+            "• /pwd - 显示当前目录\n"
+            "• /repo [name] - 列出/切换项目\n"
+            "• /projects - 显示所有项目\n\n"
+            "<b>其他功能:</b>\n"
+            "• /export - 导出会话\n"
+            "• /actions - 快速操作\n"
+            "• /git - Git 命令\n"
+            "• /restart - 重启机器人\n"
+            "• /help - 显示帮助\n"
+            "• /list - 显示此列表\n\n"
+            "💡 <i>发送任意文本与 Claude 对话</i>"
+        )
+        await update.message.reply_text(commands_text, parse_mode="HTML")
+
+    async def _cmd_help_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /help command in agentic mode (Telegram)."""
+        # In agentic mode, show simple help
+        help_text = (
+            "🤖 <b>Claude Code Bot</b>\n\n"
+            "我是你的 AI 编程助手。你可以:\n"
+            "• 发送消息让我帮你写代码、分析问题\n"
+            "• 上传文件让我分析\n"
+            "• 上传图片让我查看\n\n"
+            "<b>常用命令:</b>\n"
+            "• /new - 开始新会话\n"
+            "• /status - 查看状态\n"
+            "• /verbose [0|1|2] - 设置详细程度\n"
+            "• /repo - 列出/切换项目\n"
+            "• /list - 显示所有命令\n"
+        )
+        await update.message.reply_text(help_text, parse_mode="HTML")
+
+    async def handle_callback(self, event_data: Dict[str, Any]) -> None:
         """Handle callback from Lark platform (button clicks)."""
         import structlog
         logger = structlog.get_logger()
