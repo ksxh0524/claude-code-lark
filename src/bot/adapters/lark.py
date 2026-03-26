@@ -323,9 +323,22 @@ class LarkAdapter(PlatformAdapter):
         full_content = [""]
         update_sequence = [0]
         last_update_time = [0.0]  # Track last update time for throttling
+        timer_running = [True]  # Control timer task
 
         # Wait briefly for card to be ready before first update
         await asyncio.sleep(0.2)
+
+        # Timer task - updates subtitle with elapsed time every second
+        async def timer_task():
+            try:
+                while timer_running[0] and not interrupt_event.is_set():
+                    elapsed = time.time() - start_time
+                    await self._update_card_subtitle(card_id, f"Processing... {elapsed:.0f}s")
+                    await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                pass
+
+        timer_task_handle = asyncio.create_task(timer_task())
 
         # Stream callback - accumulates content with throttled updates
         async def on_stream(event: StreamEvent) -> None:
@@ -360,6 +373,13 @@ class LarkAdapter(PlatformAdapter):
                 ctx, on_stream, interrupt_event=interrupt_event
             )
 
+            # Stop timer task
+            timer_running[0] = False
+            try:
+                await asyncio.wait_for(timer_task_handle, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+
             elapsed = time.time() - start_time
             status = "Done" if response.success else ("Interrupted" if response.interrupted else "Error")
 
@@ -370,20 +390,27 @@ class LarkAdapter(PlatformAdapter):
 
             logger.info("Final response", content_len=len(final_text), response_len=len(response.content or ""))
 
-            # Final update with status and elapsed time (only shown at end)
-            final_content = f"**{status}** · {elapsed:.1f}s\n\n{final_text}"
+            # Final update with status in subtitle
+            await self._update_card_subtitle(card_id, f"{status} · {elapsed:.1f}s")
+            final_content = final_text
             await self._update_card_content(card_id, final_content, update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
         except asyncio.CancelledError:
+            timer_running[0] = False
+            timer_task_handle.cancel()
             elapsed = time.time() - start_time
-            await self._update_card_content(card_id, f"**Cancelled** · {elapsed:.1f}s\n\n请求已取消", update_sequence[0])
+            await self._update_card_subtitle(card_id, f"Cancelled · {elapsed:.1f}s")
+            await self._update_card_content(card_id, "请求已取消", update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
         except Exception as e:
+            timer_running[0] = False
+            timer_task_handle.cancel()
             logger.error("Error", error=str(e), exc_info=True)
             elapsed = time.time() - start_time
-            await self._update_card_content(card_id, f"**Error** · {elapsed:.1f}s\n\n{str(e)}", update_sequence[0])
+            await self._update_card_subtitle(card_id, f"Error · {elapsed:.1f}s")
+            await self._update_card_content(card_id, str(e), update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
         finally:
@@ -537,6 +564,52 @@ class LarkAdapter(PlatformAdapter):
 
             if response.code != 0:
                 logger.warning("Card content update failed", code=response.code)
+                return False
+            return True
+
+        except Exception as e:
+            logger.error("Error updating card content", error=str(e))
+            return False
+
+    async def _update_card_subtitle(self, card_id: str, subtitle: str) -> bool:
+        """Update card header subtitle via PATCH API.
+
+        Uses im.message.patch to update the card's header subtitle.
+        This is separate from content streaming updates.
+        """
+        try:
+            # Build card with just header update
+            card_json = {
+                "schema": "2.0",
+                "header": {
+                    "title": {"content": "Claude Code", "tag": "plain_text"},
+                    "subtitle": {"content": subtitle, "tag": "plain_text"},
+                    "template": "blue"
+                }
+            }
+
+            # Use cardkit card.update API to update the card
+            from lark_oapi.api.cardkit.v1 import (
+                UpdateCardRequest,
+                UpdateCardRequestBody,
+            )
+
+            update_request = UpdateCardRequest.builder() \
+                .card_id(card_id) \
+                .request_body(
+                    UpdateCardRequestBody.builder()
+                        .type("card_json")
+                        .data(json.dumps(card_json))
+                        .uuid(str(uuid.uuid4()))
+                        .build()
+                ).build()
+
+            response = await self._execute_async(
+                self.client.cardkit.v1.card.update, update_request
+            )
+
+            if response.code != 0:
+                logger.warning("Card subtitle update failed", code=response.code)
                 return False
             return True
 
