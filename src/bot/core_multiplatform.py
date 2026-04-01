@@ -65,6 +65,9 @@ class MultiPlatformBot:
         # Inject storage reference (for session persistence)
         if hasattr(self.adapter, "storage"):
             self.adapter.storage = self.deps.get("storage")
+        # Inject security validator reference (for file upload validation)
+        if hasattr(self.adapter, "security_validator"):
+            self.adapter.security_validator = self.deps.get("security_validator")
 
         # Add adapter to deps so handlers can reply
         self.deps["adapter"] = self.adapter

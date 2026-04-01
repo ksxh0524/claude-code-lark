@@ -4,6 +4,8 @@ import asyncio
 import json
 import threading
 import uuid
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 from datetime import datetime
@@ -74,6 +76,18 @@ from src.bot.adapters.models import (
 logger = structlog.get_logger()
 
 
+@dataclass
+class QueuedMessage:
+    """A message waiting in the per-user processing queue."""
+
+    event_data: Dict[str, Any]
+    text: str
+    chat_id: str
+    sender: Dict[str, Any]
+    file_info: Optional[Dict[str, Any]] = None
+    is_command: bool = False
+
+
 class LarkAdapter(PlatformAdapter):
     """Lark/Feishu platform adapter using WebSocket long polling."""
 
@@ -117,6 +131,16 @@ class LarkAdapter(PlatformAdapter):
         # Reference to orchestrator for user settings access
         self._orchestrator_ref: Optional[Any] = None
 
+        # Per-user message queue: messages are processed sequentially
+        self._message_queues: Dict[int, deque[QueuedMessage]] = defaultdict(deque)
+        self._queue_events: Dict[int, asyncio.Event] = {}  # signals "queue has items"
+        self._user_locks: Dict[int, bool] = {}  # True = currently processing
+        self._auth_manager: Optional[Any] = None  # Set by MultiPlatformBot
+        self._security_validator: Optional[Any] = None  # SecurityValidator reference
+
+        # Authentication manager for user authorization
+        self._auth_manager: Optional[Any] = None
+
     @property
     def orchestrator(self):
         """Get orchestrator reference."""
@@ -126,6 +150,26 @@ class LarkAdapter(PlatformAdapter):
     def orchestrator(self, value):
         """Set orchestrator reference."""
         self._orchestrator_ref = value
+
+    @property
+    def auth_manager(self):
+        """Get auth manager reference."""
+        return self._auth_manager
+
+    @auth_manager.setter
+    def auth_manager(self, value):
+        """Set auth manager reference."""
+        self._auth_manager = value
+
+    @property
+    def security_validator(self):
+        """Get security validator reference."""
+        return self._security_validator
+
+    @security_validator.setter
+    def security_validator(self, value):
+        """Set security validator reference."""
+        self._security_validator = value
 
     async def initialize(self) -> None:
         """Initialize Lark client."""
@@ -179,6 +223,19 @@ class LarkAdapter(PlatformAdapter):
                 # Extract file info
                 file_key = content.get("file_key", "")
                 file_name = content.get("file_name", "unknown")
+
+                # Security: validate filename (sync check)
+                if self._security_validator:
+                    is_valid, error = self._security_validator.validate_filename(file_name)
+                    if not is_valid:
+                        logger.warning("Blocked unsafe file upload", file_name=file_name, error=error)
+                        if self._main_loop and not self._main_loop.is_closed():
+                            asyncio.run_coroutine_threadsafe(
+                                self.send_message(chat_id, f"⛔ 文件被拒绝: {error}"),
+                                self._main_loop
+                            )
+                        return
+
                 file_info = {
                     "type": "file",
                     "file_key": file_key,
@@ -213,54 +270,199 @@ class LarkAdapter(PlatformAdapter):
             if not text and not file_info:
                 return
 
-            # Log the received event
+            # Security: reject extremely long messages (potential DoS)
+            MAX_MESSAGE_LENGTH = 50000
+            if len(text) > MAX_MESSAGE_LENGTH:
+                logger.warning(
+                    "Message too long, rejecting",
+                    length=len(text),
+                    chat_id=chat_id,
+                    sender_open_id=sender.get("open_id", ""),
+                )
+                if self._main_loop and not self._main_loop.is_closed():
+                    asyncio.run_coroutine_threadsafe(
+                        self.send_message(chat_id, "消息过长，请缩短后重试。"),
+                        self._main_loop,
+                    )
+                return
+
+            # Log the received event (sanitize text for logging)
+            safe_text = text[:50].replace("\n", " ").replace("\r", " ") if text else ""
             logger.info(
                 "Received Lark message",
                 chat_id=chat_id,
                 msg_type=msg_type,
-                text=text[:50] if text else "",
+                text=safe_text,
                 sender_open_id=sender.get("open_id", ""),
             )
 
-            # Dispatch to appropriate handler via main loop
+            # Enqueue message for sequential processing via main loop
             if self._main_loop and not self._main_loop.is_closed():
-                # Voice messages get special handling
+                open_id = sender.get("open_id", "")
+                user_id = hash(open_id) % 1000000
+
+                # Voice messages bypass queue (handled separately)
                 if file_info and file_info.get("type") == "audio":
                     asyncio.run_coroutine_threadsafe(
                         self._handle_voice_message(chat_id, file_info, sender),
                         self._main_loop
                     )
-                # Check if message is a command (starts with /)
-                elif text.strip().startswith("/"):
-                    # ALL commands go through orchestrator's handle_command
-                    # This ensures persistent storage, security checks, and feature parity
-                    if self._command_handlers:
-                        for handler in self._command_handlers:
-                            future = asyncio.run_coroutine_threadsafe(
-                                handler(event_data), self._main_loop
-                            )
-                            future.add_done_callback(lambda f: f.exception() if f.exception() else None)
-                    else:
-                        logger.warning("No command handlers registered", text=text[:30])
-                elif self._message_handlers:
-                    # Route to message handlers (orchestrator's handle_message)
-                    for handler in self._message_handlers:
-                        future = asyncio.run_coroutine_threadsafe(
-                            handler(event_data), self._main_loop
-                        )
-                        future.add_done_callback(lambda f: f.exception() if f.exception() else None)
-                elif hasattr(self, '_process_with_core_engine') and self.core_engine:
-                    # Fallback: process with core engine directly
-                    logger.warning("No handlers registered, using core engine fallback")
-                    future = asyncio.run_coroutine_threadsafe(
-                        self._process_with_core_engine(chat_id, text, sender, file_info=file_info),
-                        self._main_loop
+                    return
+
+                is_command = text.strip().startswith("/")
+                queued = QueuedMessage(
+                    event_data=event_data,
+                    text=text,
+                    chat_id=chat_id,
+                    sender=sender,
+                    file_info=file_info,
+                    is_command=is_command,
+                )
+                self._message_queues[user_id].append(queued)
+                queue_size = len(self._message_queues[user_id])
+                logger.info(
+                    "Message enqueued",
+                    user_id=user_id,
+                    queue_size=queue_size,
+                    is_command=is_command,
+                )
+
+                # If user not currently processing, kick off the queue consumer
+                if not self._user_locks.get(user_id, False):
+                    asyncio.run_coroutine_threadsafe(
+                        self._process_queue(user_id), self._main_loop
                     )
-                    future.add_done_callback(lambda f: f.exception() if f.exception() else None)
+                elif queue_size > 1:
+                    # Notify user they are queued
+                    asyncio.run_coroutine_threadsafe(
+                        self.send_message(
+                            chat_id,
+                            f"⏳ 排队中 (前方还有 {queue_size - 1} 条消息)",
+                        ),
+                        self._main_loop,
+                    )
 
         except Exception as e:
             logger.error("Error processing Lark message event", error=str(e), exc_info=True)
 
+    async def _process_queue(self, user_id: int) -> None:
+        """Process messages from user's queue sequentially.
+
+        This is the core consumer loop. Only one instance runs per user
+        at a time, guarded by _user_locks.
+        """
+        if self._user_locks.get(user_id, False):
+            return  # Already processing
+
+        self._user_locks[user_id] = True
+        try:
+            while self._message_queues[user_id]:
+                msg = self._message_queues[user_id].popleft()
+                try:
+                    await self._dispatch_queued_message(msg, user_id)
+                except Exception as e:
+                    logger.error(
+                        "Error processing queued message",
+                        user_id=user_id,
+                        error=str(e),
+                        exc_info=True,
+                    )
+                    try:
+                        await self.send_message(
+                            msg.chat_id, f"❌ 处理消息时出错: {str(e)[:200]}"
+                        )
+                    except Exception:
+                        pass
+        finally:
+            self._user_locks[user_id] = False
+            logger.info("Queue consumer done", user_id=user_id)
+
+    async def _dispatch_queued_message(
+        self, msg: QueuedMessage, user_id: int
+    ) -> None:
+        """Dispatch a single queued message to the appropriate handler."""
+        # Auth check
+        open_id = msg.sender.get("open_id", "")
+        if not await self._check_lark_auth(open_id, msg.chat_id):
+            return
+
+        # Input security validation (non-command messages only)
+        if not msg.is_command and self._security_validator:
+            sanitized = self._security_validator.sanitize_command_input(msg.text)
+            if sanitized != msg.text and len(sanitized) < len(msg.text) * 0.5:
+                logger.warning(
+                    "Input heavily sanitized, rejecting",
+                    user_id=user_id,
+                    original_len=len(msg.text),
+                    sanitized_len=len(sanitized),
+                )
+                await self.send_message(msg.chat_id, "⛔ 输入包含过多不安全字符，已被拒绝。")
+                return
+
+        # /stop command: interrupt current task
+        if msg.text.strip().lower() in ("/stop", "/stop\n"):
+            stopped = self.stop_current_task(user_id)
+            if stopped:
+                await self.send_message(msg.chat_id, "⏹ 已停止当前任务。")
+            else:
+                await self.send_message(msg.chat_id, "ℹ️ 没有正在进行的任务。")
+            return
+
+        # Dispatch based on type
+        if msg.is_command:
+            if self._command_handlers:
+                for handler in self._command_handlers:
+                    await handler(msg.event_data)
+            else:
+                logger.warning("No command handlers registered", text=msg.text[:30])
+        else:
+            if self._message_handlers:
+                for handler in self._message_handlers:
+                    await handler(msg.event_data)
+            elif hasattr(self, "_process_with_core_engine") and self.core_engine:
+                await self._process_with_core_engine(
+                    msg.chat_id, msg.text, msg.sender, file_info=msg.file_info
+                )
+
+    def stop_current_task(self, user_id: int) -> bool:
+        """Interrupt the currently running Claude task for a user.
+
+        Returns True if a task was interrupted, False if nothing running.
+        """
+        interrupt_event = self._stop_callbacks.get(user_id)
+        if interrupt_event and not interrupt_event.is_set():
+            interrupt_event.set()
+            logger.info("Task interrupted via /stop", user_id=user_id)
+            return True
+        return False
+
+    async def _check_lark_auth(self, open_id: str, chat_id: str) -> bool:
+        """Check if Lark user is authorized.
+
+        Derives a numeric user_id from the Lark open_id and checks
+        against the authentication manager's whitelist.
+
+        Args:
+            open_id: Lark user open_id
+            chat_id: Chat ID to send rejection message to
+
+        Returns:
+            True if authorized, False if rejected
+        """
+        if not self._auth_manager:
+            return True  # No auth configured, allow all
+
+        user_id_hash = hash(f"lark:{open_id}") & 0xFFFFFFFF
+        if self._auth_manager.is_authenticated(user_id_hash):
+            return True
+
+        # Try to authenticate (checks whitelist providers)
+        authenticated = await self._auth_manager.authenticate_user(user_id_hash)
+        if not authenticated:
+            logger.warning("Unauthorized Lark user", open_id=open_id)
+            await self.send_message(chat_id, "⛔ 未授权。请联系管理员将你添加到白名单。")
+            return False
+        return True
 
     async def _dispatch_to_handlers(
         self,
@@ -445,6 +647,21 @@ class LarkAdapter(PlatformAdapter):
 
         working_dir = self._get_working_directory(user_id)
         session_id = self._get_session_id(user_id)
+
+        # Security: validate working directory stays within approved directory
+        approved_dir = Path(self.settings.approved_directory).resolve()
+        try:
+            working_dir_resolved = Path(working_dir).resolve()
+            working_dir_resolved.relative_to(approved_dir)
+        except (ValueError, OSError):
+            logger.warning(
+                "Invalid working directory, resetting to approved directory",
+                working_dir=working_dir,
+                approved_dir=str(approved_dir),
+                user_id=user_id,
+            )
+            working_dir = str(approved_dir)
+            self._set_working_directory(user_id, working_dir)
 
         ctx = MessageContext(
             user_id=user_id,
@@ -703,7 +920,7 @@ class LarkAdapter(PlatformAdapter):
                             "behaviors": [
                                 {
                                     "type": "callback",
-                                    "value": {"action": "stop", "user_id": user_id}
+                                    "value": json.dumps({"action": "stop", "user_id": user_id})
                                 }
                             ]
                         }
@@ -1144,6 +1361,12 @@ class LarkAdapter(PlatformAdapter):
         # Save the main event loop reference for thread-safe handler dispatch
         self._main_loop = asyncio.get_running_loop()
 
+        # Monkey-patch SDK: CallBackAction.value is typed as Dict[str, Any] but
+        # Lark cardkit actually returns a string. Change to Any to prevent
+        # deserialization errors in EventDispatcherHandler.do_without_validation().
+        from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackAction
+        CallBackAction._types["value"] = Any
+
         logger.info("Starting Lark adapter", mode="websocket_long_polling")
 
         # Build event handler - register both message and card action handlers
@@ -1182,7 +1405,7 @@ class LarkAdapter(PlatformAdapter):
 
     def _on_card_action(self, data: Any) -> Any:
         """Handle card button callbacks. Must return P2CardActionTriggerResponse."""
-        from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
+        from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse, CallBackToast
 
         try:
             logger.info("Card action received", data_type=type(data).__name__)
@@ -1194,7 +1417,7 @@ class LarkAdapter(PlatformAdapter):
                 if hasattr(action, 'value'):
                     action_value = action.value
 
-            logger.info("Card action value", value=action_value)
+            logger.info("Card action value", value=action_value, value_type=type(action_value).__name__, value_repr=repr(action_value))
 
             # Parse action - support both string and dict formats
             action_type = None
@@ -1204,13 +1427,26 @@ class LarkAdapter(PlatformAdapter):
                 # New schema 2.0 format: {"action": "stop", "user_id": 123}
                 action_type = action_value.get("action")
                 user_id = action_value.get("user_id")
-            elif isinstance(action_value, str) and action_value.startswith("stop:"):
-                # Legacy string format: "stop:123"
-                action_type = "stop"
+            elif isinstance(action_value, str):
+                # Lark cardkit double-encodes JSON strings: the value is itself a JSON
+                # string encoding of another JSON string. Parse twice.
                 try:
-                    user_id = int(action_value.split(":")[1])
-                except ValueError:
-                    pass
+                    parsed = json.loads(action_value)
+                    if isinstance(parsed, str):
+                        parsed = json.loads(parsed)
+                    if isinstance(parsed, dict):
+                        action_type = parsed.get("action")
+                        user_id = parsed.get("user_id")
+                except (json.JSONDecodeError, ValueError):
+                    # Legacy string format: 'stop:123'
+                    if action_value.startswith("stop:"):
+                        action_type = "stop"
+                        try:
+                            user_id = int(action_value.split(":")[1])
+                        except ValueError:
+                            pass
+
+            logger.info("Parsed stop action", action_type=action_type, user_id=user_id, callbacks_keys=list(self._stop_callbacks.keys()))
 
             # Handle stop action
             if action_type == "stop" and user_id is not None:
@@ -1218,14 +1454,14 @@ class LarkAdapter(PlatformAdapter):
                     interrupt_event = self._stop_callbacks[user_id]
                     interrupt_event.set()
                     logger.info("Stop requested", user_id=user_id)
-                    return P2CardActionTriggerResponse({
-                        "toast": {"type": "info", "content": "正在中断请求..."}
-                    })
+                    resp = P2CardActionTriggerResponse()
+                    resp.toast = CallBackToast({"type": "info", "content": "正在中断请求..."})
+                    return resp
                 else:
                     logger.warning("No stop callback for user", user_id=user_id)
-                    return P2CardActionTriggerResponse({
-                        "toast": {"type": "warning", "content": "没有正在进行的请求"}
-                    })
+                    resp = P2CardActionTriggerResponse()
+                    resp.toast = CallBackToast({"type": "warning", "content": "没有正在进行的请求"})
+                    return resp
 
             # Handle other actions via async dispatch to main loop
             action_param = action_value.get("param", "") if isinstance(action_value, dict) else ""
@@ -1241,19 +1477,16 @@ class LarkAdapter(PlatformAdapter):
                 )
 
             # Default response
-            return P2CardActionTriggerResponse({
-                "toast": {"type": "info", "content": "操作已收到"}
-            })
+            resp = P2CardActionTriggerResponse()
+            resp.toast = CallBackToast({"type": "info", "content": "操作已收到"})
+            return resp
 
         except Exception as e:
             logger.error("Error processing card action", error=str(e), exc_info=True)
             # Return error response
-            return P2CardActionTriggerResponse({
-                "toast": {
-                    "type": "error",
-                    "content": f"处理失败: {str(e)}"
-                }
-            })
+            resp = P2CardActionTriggerResponse()
+            resp.toast = CallBackToast({"type": "error", "content": f"处理失败: {str(e)}"})
+            return resp
 
     async def _handle_card_action_async(
         self, action_type: str, action_param: str, user_id: Optional[int]
@@ -1391,14 +1624,30 @@ class LarkAdapter(PlatformAdapter):
                 logger.warning("Empty action value in card callback")
                 return
 
-            # Parse action type and parameters - support both string and dict formats
+            # Parse action type and parameters - support dict, JSON string, and legacy string formats
             if isinstance(action_value, dict):
                 # New schema 2.0 format: {"action": "stop", "user_id": 123}
                 action_type = action_value.get("action", "")
                 action_param = action_value.get("user_id", "") or action_value.get("param", "")
-            elif ":" in action_value:
-                # Legacy string format: "stop:123"
-                action_type, action_param = action_value.split(":", 1)
+            elif isinstance(action_value, str):
+                # Lark cardkit double-encodes JSON strings. Parse twice.
+                try:
+                    parsed = json.loads(action_value)
+                    if isinstance(parsed, str):
+                        parsed = json.loads(parsed)
+                    if isinstance(parsed, dict):
+                        action_type = parsed.get("action", "")
+                        action_param = parsed.get("user_id", "") or parsed.get("param", "")
+                    else:
+                        action_type = action_value
+                        action_param = ""
+                except (json.JSONDecodeError, ValueError):
+                    # Legacy string format: "stop:123"
+                    if ":" in action_value:
+                        action_type, action_param = action_value.split(":", 1)
+                    else:
+                        action_type = action_value
+                        action_param = ""
             else:
                 action_type = action_value
                 action_param = ""
@@ -2244,6 +2493,11 @@ class LarkAdapter(PlatformAdapter):
         import tempfile
 
         try:
+            # Security: file size limit (10MB)
+            MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+            if len(file_data) > MAX_FILE_SIZE:
+                return f"{original_text}\n\n[文件过大: {file_name} ({len(file_data) // 1024 // 1024}MB)，最大允许 10MB]".strip()
+
             # Detect file type from extension
             ext = os.path.splitext(file_name)[1].lower()
 
@@ -2319,6 +2573,24 @@ class LarkAdapter(PlatformAdapter):
         from io import BytesIO
 
         try:
+            # Security: zip bomb detection
+            MAX_ARCHIVE_RATIO = 100  # Max compression ratio
+            MAX_EXTRACTED_FILES = 1000  # Max files in archive
+
+            if len(file_data) > 0 and file_name.endswith(".zip"):
+                try:
+                    with zipfile.ZipFile(BytesIO(file_data)) as zf:
+                        total_uncompressed = sum(
+                            info.file_size for info in zf.filelist if not info.is_dir()
+                        )
+                        if total_uncompressed > len(file_data) * MAX_ARCHIVE_RATIO:
+                            ratio = total_uncompressed // max(len(file_data), 1)
+                            return f"{original_text}\n\n[⚠️ 压缩包可能为 zip 炸弹，已拒绝处理 (压缩比: {ratio}:1)]".strip()
+                        if len(zf.filelist) > MAX_EXTRACTED_FILES:
+                            return f"{original_text}\n\n[⚠️ 压缩包包含过多文件 ({len(zf.filelist)})，已拒绝处理]".strip()
+                except Exception:
+                    pass
+
             file_list = []
 
             # Try to extract file list

@@ -1869,7 +1869,7 @@ class MessageOrchestrator:
         known_commands = {
             "start", "help", "new", "status", "verbose", "repo", "restart",
             "sync_threads", "continue", "end", "ls", "cd", "pwd", "projects",
-            "export", "actions", "git", "list",
+            "export", "actions", "git", "list", "stop",
         }
 
         if command not in known_commands:
@@ -1898,6 +1898,9 @@ class MessageOrchestrator:
 
         elif command == "restart":
             await self._cmd_restart(adapter, chat_id)
+
+        elif command == "stop":
+            await self._cmd_stop(adapter, chat_id, user_id)
 
         elif command == "sync_threads":
             await self._cmd_sync_threads(adapter, chat_id, settings)
@@ -2072,8 +2075,21 @@ class MessageOrchestrator:
             approved_dir = Path(settings.approved_directory)
 
             if repo_name:
+                # Security: reject repo names with shell metacharacters or null bytes
+                import re
+                if '\0' in repo_name or re.search(r'[;|&`$]', repo_name):
+                    await adapter.send_message(chat_id, "❌ 项目名包含非法字符")
+                    return
+
                 # Try to switch to specified repo
-                target_dir = approved_dir / repo_name
+                target_dir = (approved_dir / repo_name).resolve()
+                # Security: resolved path must stay within approved directory
+                try:
+                    target_dir.relative_to(approved_dir.resolve())
+                except ValueError:
+                    await adapter.send_message(chat_id, "❌ 不能访问批准目录之外的路径")
+                    return
+
                 if target_dir.exists() and target_dir.is_dir():
                     # Store in memory cache
                     if user_id not in self._user_settings:
@@ -2154,7 +2170,8 @@ class MessageOrchestrator:
             "<b>其他命令:</b>\n"
             "• /export - 导出会话\n"
             "• /git - Git 命令\n"
-            "• /restart - 重启机器人\n\n"
+            "• /restart - 重启机器人\n"
+            "• /list - 显示所有命令\n\n"
             "<b>使用提示:</b>\n"
             "• 发送任意文本与 Claude 对话\n"
             "• 上传文件让 Claude 分析\n"
@@ -2298,6 +2315,12 @@ class MessageOrchestrator:
                 await adapter.send_message(chat_id, "⚠️ 配置不可用")
                 return
 
+            # Security: reject directory names with shell metacharacters or null bytes
+            import re
+            if '\0' in directory or re.search(r'[;|&`$]', directory):
+                await adapter.send_message(chat_id, "❌ 目录名包含非法字符")
+                return
+
             # Get current working directory
             current_dir = Path(settings.approved_directory)
             if storage:
@@ -2311,10 +2334,11 @@ class MessageOrchestrator:
             else:
                 target_dir = current_dir / directory
 
-            # Security check - must be within approved directory
+            # Resolve and security check - must be within approved directory
             approved_path = Path(settings.approved_directory).resolve()
+            target_dir = target_dir.resolve()
             try:
-                target_dir.resolve().relative_to(approved_path)
+                target_dir.relative_to(approved_path)
             except ValueError:
                 await adapter.send_message(chat_id, "❌ 不能访问批准目录之外的路径")
                 return
@@ -2480,7 +2504,7 @@ class MessageOrchestrator:
         await adapter.send_card(chat_id, actions_card)
 
     async def _cmd_git(self, adapter, chat_id: str, user_id: int, git_cmd: str, settings, storage) -> None:
-        """Handle /git command - git operations."""
+        """Handle /git command - git operations using safe GitIntegration."""
         try:
             if settings is None:
                 await adapter.send_message(chat_id, "⚠️ 配置不可用")
@@ -2500,20 +2524,24 @@ class MessageOrchestrator:
                 await adapter.send_message(chat_id, "❌ 当前目录不是 Git 仓库")
                 return
 
-            import subprocess
+            # Use safe GitIntegration instead of raw subprocess
+            from src.bot.features.git_integration import GitIntegration
+            git = GitIntegration(settings)
 
             if git_cmd == "status":
-                result = subprocess.run(["git", "status", "--short"], cwd=work_dir, capture_output=True, text=True)
-                msg = f"📋 <b>Git Status</b>\n\n<pre>{result.stdout or '工作区干净'}</pre>"
+                status = await git.get_status(work_dir)
+                msg = f"📋 <b>Git Status</b>\n\n<pre>{git.format_status(status)}</pre>"
             elif git_cmd == "log":
-                result = subprocess.run(["git", "log", "--oneline", "-10"], cwd=work_dir, capture_output=True, text=True)
-                msg = f"📜 <b>Git Log (最近10条)</b>\n\n<pre>{result.stdout or '无提交历史'}</pre>"
+                stdout, _ = await git.execute_git_command(
+                    ["git", "log", "--oneline", "--max-count=10"], work_dir
+                )
+                msg = f"📜 <b>Git Log (最近10条)</b>\n\n<pre>{stdout or '无提交历史'}</pre>"
             elif git_cmd == "branch":
-                result = subprocess.run(["git", "branch"], cwd=work_dir, capture_output=True, text=True)
-                msg = f"🌿 <b>Git Branches</b>\n\n<pre>{result.stdout or '无分支'}</pre>"
+                stdout, _ = await git.execute_git_command(["git", "branch"], work_dir)
+                msg = f"🌿 <b>Git Branches</b>\n\n<pre>{stdout or '无分支'}</pre>"
             elif git_cmd == "diff":
-                result = subprocess.run(["git", "diff", "--stat"], cwd=work_dir, capture_output=True, text=True)
-                msg = f"📊 <b>Git Diff</b>\n\n<pre>{result.stdout or '无变更'}</pre>"
+                diff_text = await git.get_diff(work_dir)
+                msg = f"📊 <b>Git Diff</b>\n\n<pre>{diff_text}</pre>"
             else:
                 msg = (
                     "🌳 <b>Git 命令</b>\n\n"
@@ -2526,6 +2554,23 @@ class MessageOrchestrator:
             await adapter.send_message(chat_id, msg)
         except Exception as e:
             await adapter.send_message(chat_id, f"❌ Git 命令失败: {str(e)}")
+
+    async def _cmd_stop(self, adapter, chat_id: str, user_id: int) -> None:
+        """Handle /stop command - interrupt current Claude task."""
+        if hasattr(adapter, "stop_current_task"):
+            stopped = adapter.stop_current_task(user_id)
+            if stopped:
+                await adapter.send_message(chat_id, "⏹ 已停止当前任务。")
+            else:
+                await adapter.send_message(chat_id, "ℹ️ 没有正在进行的任务。")
+        else:
+            # Fallback: try core_engine interrupt
+            core_engine = self.deps.get("core_engine")
+            if core_engine and core_engine.is_processing(user_id):
+                core_engine.interrupt(user_id)
+                await adapter.send_message(chat_id, "⏹ 已停止当前任务。")
+            else:
+                await adapter.send_message(chat_id, "ℹ️ 没有正在进行的任务。")
 
     async def _cmd_list(self, adapter, chat_id: str) -> None:
         """Handle /list command - show all available commands with descriptions."""
