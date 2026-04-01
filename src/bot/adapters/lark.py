@@ -123,6 +123,8 @@ class LarkAdapter(PlatformAdapter):
         self.core_engine: Optional[Any] = None  # CoreEngine instance
         self.settings: Optional[Any] = None  # Settings instance
         self._stop_callbacks: Dict[int, asyncio.Event] = {}  # user_id -> interrupt event
+        self._streaming_cards: Dict[int, tuple] = {}  # user_id -> (card_id, message_id, update_seq)
+        self._streaming_start_time: Dict[int, float] = {}  # user_id -> start timestamp
 
         # Per-user state: working directory, session ID, etc.
         # Mirrors Telegram's context.user_data for platform-agnostic features.
@@ -598,19 +600,9 @@ class LarkAdapter(PlatformAdapter):
                         return
 
                 elif file_info.get("type") == "image":
-                    # Download and process image
-                    image_key = file_info.get("image_key", "")
-
-                    # Send processing message
-                    await self.send_message(chat_id, "正在处理图片...")
-
-                    image_data = await self.download_image(image_key)
-                    if image_data:
-                        # Process image for text description
-                        text = await self._process_image_content(image_data, text)
-                    else:
-                        await self.send_message(chat_id, "无法下载图片")
-                        return
+                    # Image will be processed below together with base64 preparation
+                    # (single download, reuse for both text processing and Claude API)
+                    pass
 
             except Exception as e:
                 logger.error("Error processing file/image", error=str(e), exc_info=True)
@@ -618,20 +610,19 @@ class LarkAdapter(PlatformAdapter):
                 return
 
         # Prepare base64 image data for Claude's multimodal API
-        # Reuse the image data already downloaded during file processing
+        # Download image once and reuse for both text processing and Claude API
         images = None
+        img_bytes = None  # Track downloaded image bytes for reuse
         if file_info and file_info.get("type") == "image":
             image_key = file_info.get("image_key", "")
             if image_key:
                 try:
-                    # If we already downloaded the image above, reuse it;
-                    # otherwise download now
-                    if 'image_data' in dir() and image_data:
-                        img_bytes = image_data
-                    else:
-                        img_bytes = await self.download_image(image_key)
+                    img_bytes = await self.download_image(image_key)
                     if img_bytes:
                         import base64
+                        # Process image for text description first
+                        text = await self._process_image_content(img_bytes, text)
+                        # Then prepare base64 for Claude's multimodal API
                         images = [{
                             "data": base64.b64encode(img_bytes).decode("utf-8"),
                             "media_type": "image/png",
@@ -693,6 +684,10 @@ class LarkAdapter(PlatformAdapter):
         tool_lines: List[str] = []  # Track tool calls for nice display
         update_sequence = [1]  # Start from 1 (0 might fail - card not ready)
         last_update_time = [0.0]  # Track last update time for throttling
+
+        # Store streaming state for card action handler access
+        self._streaming_cards[user_id] = (card_id, message_id, update_sequence)
+        self._streaming_start_time[user_id] = start_time
 
         # Wait for card to be ready before first update (1s to ensure card is fully created)
         await asyncio.sleep(1.0)
@@ -853,6 +848,8 @@ class LarkAdapter(PlatformAdapter):
 
         finally:
             self._stop_callbacks.pop(user_id, None)
+            self._streaming_cards.pop(user_id, None)
+            self._streaming_start_time.pop(user_id, None)
 
     async def _create_streaming_card(
         self, chat_id: str, user_id: int = 0
@@ -1417,7 +1414,7 @@ class LarkAdapter(PlatformAdapter):
                 if hasattr(action, 'value'):
                     action_value = action.value
 
-            logger.info("Card action value", value=action_value, value_type=type(action_value).__name__, value_repr=repr(action_value))
+            logger.info("Card action value", value=action_value, value_type=type(action_value).__name__)
 
             # Parse action - support both string and dict formats
             action_type = None
@@ -1446,14 +1443,31 @@ class LarkAdapter(PlatformAdapter):
                         except ValueError:
                             pass
 
-            logger.info("Parsed stop action", action_type=action_type, user_id=user_id, callbacks_keys=list(self._stop_callbacks.keys()))
+            logger.info("Parsed card action", action_type=action_type, user_id=user_id)
 
             # Handle stop action
             if action_type == "stop" and user_id is not None:
                 if user_id in self._stop_callbacks:
+                    import time
                     interrupt_event = self._stop_callbacks[user_id]
                     interrupt_event.set()
                     logger.info("Stop requested", user_id=user_id)
+
+                    # Immediately update card to show interrupting status
+                    if user_id in self._streaming_cards:
+                        card_id, _, update_seq = self._streaming_cards[user_id]
+                        if card_id:
+                            elapsed = time.time() - self._streaming_start_time.get(user_id, time.time())
+                            status_text = "⏹ 正在中断..."
+                            # Inline format_with_status (defined in _process_with_core_engine scope, not accessible here)
+                            interrupting_display = f"**{status_text} · {elapsed:.0f}s**\n\n用户已请求中断，正在停止 Claude...\n\n请稍候。"
+                            async def _update_stop_card():
+                                try:
+                                    await self._update_card_content(card_id, interrupting_display, update_seq[0] + 1)
+                                except Exception as e:
+                                    logger.warning("Failed to update card on stop", error=str(e))
+                            asyncio.ensure_future(_update_stop_card())
+
                     resp = P2CardActionTriggerResponse()
                     resp.toast = CallBackToast({"type": "info", "content": "正在中断请求..."})
                     return resp
@@ -1655,12 +1669,19 @@ class LarkAdapter(PlatformAdapter):
             # --- Stop action (interrupt active request) ---
             if action_type == "stop":
                 try:
+                    import time
                     user_id = int(action_param) if action_param else 0
                     if user_id in self._stop_callbacks:
                         interrupt_event = self._stop_callbacks[user_id]
                         interrupt_event.set()
                         logger.info("Stop requested via card callback", user_id=user_id)
-                        await self.send_message(open_chat_id, "⏹️ 已中断请求")
+                        # Update streaming card if available
+                        if user_id in self._streaming_cards:
+                            card_id, _, update_seq = self._streaming_cards[user_id]
+                            if card_id:
+                                elapsed = time.time() - self._streaming_start_time.get(user_id, time.time())
+                                stop_display = f"**⏹ 正在中断... · {elapsed:.0f}s**\n\n用户已请求中断，正在停止 Claude..."
+                                await self._update_card_content(card_id, stop_display, update_seq[0] + 1)
                     else:
                         logger.warning("No active request for user", user_id=user_id)
                         await self.send_message(open_chat_id, "⚠️ 没有正在进行的请求")
