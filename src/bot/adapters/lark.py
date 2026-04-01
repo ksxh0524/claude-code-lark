@@ -125,6 +125,7 @@ class LarkAdapter(PlatformAdapter):
         self._stop_callbacks: Dict[int, asyncio.Event] = {}  # user_id -> interrupt event
         self._streaming_cards: Dict[int, tuple] = {}  # user_id -> (card_id, message_id, update_seq)
         self._streaming_start_time: Dict[int, float] = {}  # user_id -> start timestamp
+        self._stop_card_updated: Dict[int, bool] = {}  # user_id -> True if stop handler already updated card
 
         # Per-user state: working directory, session ID, etc.
         # Mirrors Telegram's context.user_data for platform-agnostic features.
@@ -798,8 +799,14 @@ class LarkAdapter(PlatformAdapter):
             )
 
             elapsed = time.time() - start_time
+
+            # Check if user requested interrupt (even if Claude SDK doesn't report it)
+            user_stopped = interrupt_event.is_set()
+
             # Chinese status messages
-            if response.success:
+            if user_stopped:
+                status = "⏹ 用户中断"
+            elif response.success:
                 status = "✅ 完成"
             elif response.interrupted:
                 status = "⏹ 用户中断"
@@ -820,18 +827,27 @@ class LarkAdapter(PlatformAdapter):
 
             # Always use response.content as final text (it's complete)
             final_text = response.content if response.content else full_content[0]
-            if response.interrupted:
+            if user_stopped or response.interrupted:
                 final_text += "\n\n_(用户中断)_"
 
-            logger.info("Final response", content_len=len(final_text), response_len=len(response.content or ""))
+            logger.info("Final response", content_len=len(final_text), response_len=len(response.content or ""), interrupted=user_stopped)
 
-            # Final update with status — build full display including tool lines
+            # Final card update
             if response.content:
                 full_content[0] = response.content
             final_display = _build_display_content()
             final_display = format_with_status(final_display, status, elapsed)
+
+            # If stop handler already updated the card via asyncio.ensure_future,
+            # wait briefly for it to land, then overwrite with definitive final state
+            if self._stop_card_updated.get(user_id):
+                await asyncio.sleep(0.5)  # Let stop handler's update settle
+                # Bump sequence to ensure we're ahead of the stop handler's update
+                update_sequence[0] += 2
+
             await self._update_card_content(card_id, final_display, update_sequence[0])
-            await self._close_streaming_mode(card_id, update_sequence[0] + 1)
+            update_sequence[0] += 1
+            await self._close_streaming_mode(card_id, update_sequence[0])
 
         except asyncio.CancelledError:
             elapsed = time.time() - start_time
@@ -850,6 +866,7 @@ class LarkAdapter(PlatformAdapter):
             self._stop_callbacks.pop(user_id, None)
             self._streaming_cards.pop(user_id, None)
             self._streaming_start_time.pop(user_id, None)
+            self._stop_card_updated.pop(user_id, None)
 
     async def _create_streaming_card(
         self, chat_id: str, user_id: int = 0
@@ -1451,6 +1468,7 @@ class LarkAdapter(PlatformAdapter):
                     import time
                     interrupt_event = self._stop_callbacks[user_id]
                     interrupt_event.set()
+                    self._stop_card_updated[user_id] = True
                     logger.info("Stop requested", user_id=user_id)
 
                     # Immediately update card to show interrupting status
@@ -1674,6 +1692,7 @@ class LarkAdapter(PlatformAdapter):
                     if user_id in self._stop_callbacks:
                         interrupt_event = self._stop_callbacks[user_id]
                         interrupt_event.set()
+                        self._stop_card_updated[user_id] = True
                         logger.info("Stop requested via card callback", user_id=user_id)
                         # Update streaming card if available
                         if user_id in self._streaming_cards:
