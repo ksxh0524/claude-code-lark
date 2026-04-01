@@ -1,389 +1,193 @@
-# Lark/Feishu Platform Setup Guide
+# 飞书/Lark 配置指南
 
-This guide will walk you through setting up Claude Code Bot on Lark (international version) or Feishu (Chinese version).
+本文档介绍如何配置飞书/Lark 机器人。
 
-## Table of Contents
+## 目录
 
-1. [Prerequisites](#prerequisites)
-2. [Creating Your App](#creating-your-app)
-3. [Configuring Permissions](#configuring-permissions)
-4. [Configuring Events](#configuring-events)
-5. [Configuring Bot Settings](#configuring-bot-settings)
-6. [Setting Up Webhooks](#setting-up-webhooks)
-7. [Getting User IDs](#getting-user-ids)
-8. [Environment Configuration](#environment-configuration)
-9. [Testing Your Bot](#testing-your-bot)
+1. [前提条件](#前提条件)
+2. [创建应用](#创建应用)
+3. [配置权限](#配置权限)
+4. [配置事件订阅](#配置事件订阅)
+5. [配置机器人](#配置机器人)
+6. [环境配置](#环境配置)
+7. [获取用户 ID](#获取用户-id)
+8. [启动运行](#启动运行)
+9. [常见问题](#常见问题)
 
-## Prerequisites
+## 前提条件
 
-- A Lark or Feishu account
-- Admin access to create apps in your organization
-- Python 3.11+ installed
-- Claude Code CLI installed
+- 飞书或 Lark 账号（需要管理员权限创建应用）
+- Python 3.11+
+- Claude Code CLI（已安装并完成认证）
 
-## Platform Differences
+## 创建应用
 
-**Lark** (国际版): https://www.larksuite.com/
-- For international users
-- English interface
-- Global servers
+### 1. 进入开放平台
 
-**Feishu** (飞书): https://www.feishu.cn/
-- For users in China
-- Chinese interface
-- China-based servers
+- 飞书: https://open.feishu.cn/app
+- Lark: https://open.larksuite.com/app
 
-The setup process is identical for both platforms. This guide uses "Lark" to refer to both.
+### 2. 创建企业自建应用
 
-## Creating Your App
+1. 点击「创建应用」
+2. 选择「企业自建应用」
+3. 填写应用名称（如 "Claude Code"）和描述
+4. 创建完成后记录 **App ID** 和 **App Secret**
 
-### Step 1: Access the Open Platform
+```
+App ID: cli_xxxxxxxxx
+App Secret: xxxxxxxxx
+```
 
-**Lark**: https://open.larksuite.com/app
-**Feishu**: https://open.feishu.cn/app
+## 配置权限
 
-### Step 2: Create a New App
+进入应用 →「权限管理」，添加以下权限：
 
-1. Click **"Create App"** (创建应用)
-2. Select **"Enterprise Self-Built App"** (企业自建应用)
-3. Click **"Create"** (创建)
+### 必需权限
 
-### Step 3: Configure Basic Information
+| 权限 | 说明 | 权限标识 |
+|------|------|---------|
+| 获取与发送单聊、群组消息 | 机器人收发消息 | `im:message` |
+| 接收群聊中@机器人消息 | 群聊触发 | `im:message:group_at_msg` |
+| 获取群组信息 | 群组管理 | `im:chat` |
+| 获取用户基本信息 | 用户身份识别 | `contact:user.base:readonly` |
+| 读取云空间中文件 | 文件下载 | `drive:drive:readonly` |
 
-1. **App Name** (应用名称): e.g., "Claude Code Bot"
-2. **App Description** (应用描述): e.g., "AI coding assistant powered by Claude"
-3. **App Icon** (应用图标): Upload a bot icon
-4. Click **"Save"** (保存)
+### 添加步骤
 
-### Step 4: Get Your Credentials
+1. 搜索并添加以上权限
+2. 点击「批量申请权限」提交审批
+3. 等待管理员批准（如果你是管理员则自动通过）
 
-After creating the app, you'll see:
+## 配置事件订阅
 
-- **App ID** (应用ID): Starts with `cli_`
-- **App Secret** (应用密钥): Click to reveal
+### 重要：WebSocket 模式不需要配置 Webhook
 
-Save these for later - you'll need them for configuration.
+本机器人使用 **WebSocket 长连接** 接收事件，**不需要**配置请求 URL。但仍然需要在开放平台订阅事件。
+
+### 订阅事件
+
+进入应用 →「事件订阅」→ 添加事件：
+
+1. **`im.message.receive_v1`** — 接收消息事件（必需）
+2. **`card.action.trigger`** — 卡片按钮回调（必需，Stop 按钮需要）
+
+### 注意事项
+
+- 不需要填写「请求地址」（WebSocket 模式自动连接）
+- 不需要配置「加密策略」（可选，默认关闭）
+- 事件订阅后需要**重新发布**应用才能生效
+
+## 配置机器人
+
+进入应用 →「应用功能」→「机器人」：
+
+1. 开启「启用机器人」
+2. 填写机器人名称和描述
+3. 上传头像
+4. 开启「允许机器人查看用户信息」
+
+## 环境配置
+
+### .env 文件
 
 ```bash
-LARK_APP_ID=cli_xxxxxxxxx
-LARK_APP_SECRET=xxxxxxxxx
-```
-
-## Configuring Permissions
-
-### Step 1: Go to Permissions
-
-From your app page, go to **"Permissions & Scopes"** (权限与 scope) or **"Permissions"** (权限管理).
-
-### Step 2: Add Required Scopes
-
-Add the following scopes (search and add them):
-
-#### Required Scopes
-
-| Scope | Description | Chinese Name |
-|-------|-------------|--------------|
-| `im:message` | Send and receive messages | 获取与发送消息 |
-| `im:message:group_at_msg` | Receive group @messages | 读取群聊中@机器人的消息 |
-| `im:chat` | Access chat information | 获取群组信息 |
-| `contact:user.base:readonly` | Read user information | 获取用户基本信息 |
-| `drive:drive:readonly` | Read files (optional) | 读取云文档信息 |
-
-### Step 3: Request Approval
-
-1. After adding scopes, click **"Bulk Apply for Permission"** (批量申请权限)
-2. Select which permissions to request
-3. Click **"Submit"** (提交)
-
-**Note**: Some permissions may require admin approval. Contact your organization admin if needed.
-
-## Configuring Events
-
-### Step 1: Go to Events
-
-From your app page, go to **"Events"** (事件) or **"Event Subscriptions"** (事件订阅).
-
-### Step 2: Subscribe to Message Events
-
-1. Click **"Add Event"** (添加事件)
-2. Search for and add: **"Receive Message"** (`im.message.receive_v1`)
-3. Click **"Add"** (添加)
-
-This event is triggered when:
-- A user sends a message to the bot
-- A user @mentions the bot in a group
-
-### Step 3: Configure Event Details
-
-For **im.message.receive_v1**, you can optionally:
-- Filter by message types
-- Set up request URL (webhook)
-
-## Configuring Bot Settings
-
-### Step 1: Enable Bot
-
-1. Go to **"Bot Configuration"** (机器人配置) or **"Bot"** in the left menu
-2. Toggle **"Enable Bot"** (启用机器人) to ON
-3. Fill in:
-   - **Bot Name** (机器人名称): e.g., "Claude Code Bot"
-   - **Bot Description** (机器人描述): e.g., "Your AI coding assistant"
-   - **Bot Avatar** (机器人头像): Upload an image
-
-### Step 2: Configure Bot Features
-
-Enable these features:
-- ✅ **Allow users to add bot to groups** (允许将机器人添加到群组)
-- ✅ **Allow bot to view user information** (允许机器人查看用户信息)
-
-## Setting Up Webhooks
-
-Webhooks allow Lark to push events to your bot in real-time.
-
-### Option 1: Public URL (Recommended for Production)
-
-If you have a public server:
-
-1. Go to **"Event Subscriptions"** (事件订阅)
-2. Enter your **Request URL**:
-   ```
-   https://your-server.com/webhooks/lark
-   ```
-3. Lark will send a verification request
-4. Your bot should handle the verification challenge
-
-### Option 2: Local Development (Tunneling)
-
-For local development, use a tunneling service:
-
-**Using ngrok:**
-```bash
-# Install ngrok
-brew install ngrok  # macOS
-# or download from https://ngrok.com
-
-# Start tunnel
-ngrok http 8080
-
-# You'll get a URL like: https://abc123.ngrok.io
-```
-
-Then use: `https://abc123.ngrok.io/webhooks/lark`
-
-**Using localtunnel:**
-```bash
-# Install
-npm install -g localtunnel
-
-# Start tunnel
-lt --port 8080
-```
-
-### Option 3: Polling Mode (Development Only)
-
-For simple testing, you can skip webhooks and use polling mode:
-
-```bash
-# In .env
-LARK_WEBHOOK_URL=
-# Leave empty for polling mode
-```
-
-**Note**: Polling is not recommended for production as it's less efficient.
-
-### Encryption Settings (Optional)
-
-For enhanced security, enable encryption:
-
-1. In **"Event Subscriptions"**, enable **"Encrypt Key"** (加密键)
-2. Lark will generate an encryption key
-3. Copy this key to your `.env`:
-   ```bash
-   LARK_ENCRYPT_KEY=your_encryption_key_here
-   ```
-
-### Verification Token (Optional)
-
-Add an extra layer of verification:
-
-1. In event settings, generate a **Verification Token**
-2. Add to your `.env`:
-   ```bash
-   LARK_VERIFICATION_TOKEN=your_token_here
-   ```
-
-## Getting User IDs
-
-To whitelist users, you need their Lark `open_id`.
-
-### Method 1: From the Event Log
-
-1. Have a user send a message to your bot
-2. Check your bot logs
-3. Look for the `sender.open_id` field in the event
-
-Example event:
-```json
-{
-  "sender": {
-    "sender_id": {
-      "open_id": "ou_xxxxxxxxxxxxxxxxxxxxxxxx"
-    }
-  }
-}
-```
-
-### Method 2: Using Lark API
-
-Use the API to get user info:
-
-```python
-from lark_oapi.api.contact.user.v3 import GetUserRequest
-
-request = GetUserRequest.builder() \
-    .user_id("user_id") \
-    .user_id_type("open_id") \
-    .build()
-
-response = await client.contact.user.v3.get(request)
-print(response.data.user.open_id)
-```
-
-### Method 3: From Lark Admin Console
-
-1. Go to **Admin Console** (管理后台)
-2. Navigate to **Contacts** (通讯录)
-3. Click on a user
-4. Look for their `open_id` in the URL or user details
-
-## Environment Configuration
-
-Update your `.env` file with all the Lark settings:
-
-```bash
-# Platform selection
+# 平台选择
 PLATFORM=lark
 
-# Lark/Feishu credentials
-LARK_APP_ID=cli_xxxxxxxxxxxxxxxxxxxxxx
-LARK_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx
+# 飞书应用凭证
+LARK_APP_ID=cli_xxxxxxxxx
+LARK_APP_SECRET=xxxxxxxxx
 
-# Optional: Webhook and security
-LARK_WEBHOOK_URL=https://your-server.com/webhooks/lark
-LARK_ENCRYPT_KEY=your_encryption_key
-LARK_VERIFICATION_TOKEN=your_verification_token
+# 安全设置
+APPROVED_DIRECTORY=/path/to/your/projects
+ALLOWED_USERS=ou_xxxxxxxxx
 
-# Common settings
-APPROVED_DIRECTORY=/Users/yourname/projects
-ALLOWED_USERS=ou_xxxxxxxxx,ou_yyyyyyyyy
-
-# Claude settings
-ANTHROPIC_API_KEY=sk-ant-xxxxx
+# Claude 设置
 USE_SDK=true
+CLAUDE_TIMEOUT_SECONDS=300
 
-# Bot mode
-AGENTIC_MODE=true
-VERBOSE_LEVEL=1
+# 可选：调试模式
+DEBUG=false
+LOG_LEVEL=INFO
 ```
 
-## Testing Your Bot
+### 获取用户 ID
 
-### Step 1: Start Your Bot
+与机器人对话后，在日志中查看 `open_id`：
+
+```
+{"sender_open_id": "ou_xxxxxxxxx", "event": "Received Lark message"}
+```
+
+将 `ou_xxxxxxxxx` 添加到 `ALLOWED_USERS`。
+
+## 启动运行
 
 ```bash
+# 安装依赖
+make dev
+
+# 启动机器人
+make run
+
+# 或调试模式
 make run-debug
 ```
 
-You should see:
+启动成功日志：
+
 ```
-INFO: Initializing Lark adapter
-INFO: Lark adapter initialized successfully
-INFO: Starting Lark adapter
-INFO: Lark adapter started (webhook mode)
-```
-
-### Step 2: Find Your Bot
-
-1. Open Lark/Feishu
-2. In the search bar, type your bot's name
-3. Click on your bot to open a chat
-
-### Step 3: Send a Test Message
-
-Send a simple message like:
-```
-/start
+INFO Starting Lark adapter mode=websocket_long_polling
+INFO WebSocket client starting...
+INFO Lark adapter started (WebSocket mode)
+connected to wss://msg-frontier.feishu.cn/ws/v2?...
 ```
 
-You should receive a welcome message.
+## 常见问题
 
-### Step 4: Test Basic Commands
+### 机器人无响应
 
-Try these commands:
-```
-/help      - Show help message
-/status    - Show bot status
-/new       - Start a new Claude session
-```
+1. 检查 `PLATFORM=lark` 是否设置
+2. 确认 `LARK_APP_ID` 和 `LARK_APP_SECRET` 正确
+3. 确认权限已审批通过
+4. 确认事件已订阅且应用已发布
+5. 检查 Claude Code CLI: `claude auth status`
 
-### Step 5: Test Claude Integration
+### 权限不足
 
-Send a coding request:
-```
-What files are in this project?
-```
+1. 进入「权限管理」确认所有权限状态为「已开通」
+2. 修改权限后需要**重新发布**应用
+3. 需要企业管理员审批
 
-The bot should respond with the project structure.
+### 事件收不到
 
-## Troubleshooting
+1. 确认已订阅 `im.message.receive_v1` 和 `card.action.trigger`
+2. 应用修改后需要重新发布
+3. 检查日志中 WebSocket 连接是否成功
 
-### Bot Not Responding
+### 卡片显示异常
 
-1. **Check logs**: Run with `make run-debug` to see detailed logs
-2. **Verify credentials**: Ensure `LARK_APP_ID` and `LARK_APP_SECRET` are correct
-3. **Check permissions**: Verify all required scopes are approved
-4. **Test webhook**: Use webhook test tools to verify your endpoint
+1. 确认已添加 `im:message` 权限
+2. 检查 CardKit API 是否可用（飞书企业版功能）
+3. 查看日志中的卡片 API 返回码
 
-### Events Not Received
+### Stop 按钮不工作
 
-1. **Verify event subscription**: Check that `im.message.receive_v1` is subscribed
-2. **Check webhook URL**: Ensure your webhook URL is accessible
-3. **Review encryption**: If using encryption, verify the key matches
-4. **Test with ngrok**: Use a tunneling service to test locally
+1. 确认已订阅 `card.action.trigger` 事件
+2. Stop 按钮通过 WebSocket 事件触发，不需要 webhook
+3. 查看日志中的 "Card action received" 日志确认事件是否到达
 
-### Permission Denied Errors
+## WebSocket vs Webhook
 
-1. **Review scopes**: Ensure all required scopes are added
-2. **Request approval**: Submit permission requests to admin
-3. **Check bot status**: Verify the bot is enabled in bot configuration
+本机器人默认使用 WebSocket 长连接模式：
 
-### Can't Find User ID
+| 特性 | WebSocket (默认) | Webhook |
+|------|-----------------|---------|
+| 公网地址 | 不需要 | 需要 |
+| 配置复杂度 | 低 | 中 |
+| 实时性 | 高 | 高 |
+| 适用场景 | 开发/内网部署 | 生产/云部署 |
+| 连接方式 | 主动连接飞书服务器 | 飞书推送事件到你的服务器 |
 
-1. **Check event logs**: Look at incoming events in debug logs
-2. **Use API**: Use the Lark API to query user information
-3. **Ask user**: Have the user send `/start` and check the logs
-
-## Next Steps
-
-Once your bot is working:
-
-1. **Add to groups**: Add the bot to group chats for collaborative coding
-2. **Set up quick actions**: Configure commonly used commands
-3. **Enable features**: Turn on file uploads, voice messages, etc.
-4. **Monitor usage**: Check the database for usage statistics
-
-## Additional Resources
-
-- [Lark Open Platform Documentation](https://open.larksuite.com/document)
-- [Feishu Open Platform Documentation](https://open.feishu.cn/document)
-- [Lark Python SDK](https://github.com/larksuite-oapi/lark-oapi-python)
-- [Claude Code Documentation](https://claude.ai/code)
-
-## Support
-
-If you encounter issues:
-
-1. Check the [Troubleshooting](#troubleshooting) section
-2. Review bot logs with `make run-debug`
-3. Check Lark/Feishu Open Platform documentation
-4. Open an issue on GitHub
+如需切换到 Webhook 模式，在 `.env` 中设置 `LARK_WEBHOOK_URL`。
