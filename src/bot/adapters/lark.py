@@ -335,12 +335,13 @@ class LarkAdapter(PlatformAdapter):
                     asyncio.run_coroutine_threadsafe(
                         self._process_queue(user_id), self._main_loop
                     )
-                elif queue_size > 1:
-                    # Notify user they are queued
+                else:
+                    # User is busy — always notify how many messages are waiting
+                    waiting = len(self._message_queues[user_id])
                     asyncio.run_coroutine_threadsafe(
                         self.send_message(
                             chat_id,
-                            f"⏳ 排队中 (前方还有 {queue_size - 1} 条消息)",
+                            f"⏳ 任务执行中，你的消息已排队 (当前排队 {waiting} 条)",
                         ),
                         self._main_loop,
                     )
