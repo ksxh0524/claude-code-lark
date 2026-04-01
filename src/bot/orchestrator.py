@@ -1971,6 +1971,9 @@ class MessageOrchestrator:
             if storage:
                 # Clear session for this user
                 await storage.clear_user_session(user_id)
+            # Also clear adapter internal state
+            if hasattr(adapter, '_set_session_id'):
+                adapter._set_session_id(user_id, None)
             msg = "🆕 已开始新会话，上下文已清除。"
             await adapter.send_message(chat_id, msg)
             if audit_logger:
@@ -1983,15 +1986,33 @@ class MessageOrchestrator:
         try:
             status_parts = ["📊 <b>会话状态</b>\n"]
 
-            # Get session info
-            if storage:
+            # Get state from adapter
+            work_dir = adapter._get_working_directory(user_id) if hasattr(adapter, '_get_working_directory') else "未知"
+            session_id = adapter._get_session_id(user_id) if hasattr(adapter, '_get_session_id') else None
+
+            if session_id:
+                status_parts.append(f"• 会话 ID: <code>{session_id[:16]}...</code>")
+            elif storage:
                 session = await storage.get_active_session(user_id)
                 if session:
                     status_parts.append(f"• 会话 ID: <code>{session.session_id[:16]}...</code>")
-                    status_parts.append(f"• 工作目录: <code>{session.working_directory}</code>")
-                    status_parts.append(f"• 创建时间: {session.created_at.strftime('%Y-%m-%d %H:%M')}")
                 else:
                     status_parts.append("• 无活跃会话")
+            else:
+                status_parts.append("• 无活跃会话")
+
+            if work_dir and work_dir != "未知":
+                status_parts.append(f"• 工作目录: <code>{work_dir}</code>")
+            elif storage:
+                session = await storage.get_active_session(user_id)
+                if session:
+                    status_parts.append(f"• 工作目录: <code>{session.working_directory}</code>")
+
+            # Try to get created time from storage
+            if storage:
+                session = await storage.get_active_session(user_id)
+                if session:
+                    status_parts.append(f"• 创建时间: {session.created_at.strftime('%Y-%m-%d %H:%M')}")
 
             # Get cost info
             if claude_integration:
@@ -2058,18 +2079,41 @@ class MessageOrchestrator:
                     if user_id not in self._user_settings:
                         self._user_settings[user_id] = {}
                     self._user_settings[user_id]["working_directory"] = str(target_dir)
-                    await adapter.send_message(chat_id, f"✅ 已切换到: <code>{repo_name}</code>")
+
+                    # Also update adapter's internal state
+                    adapter._set_working_directory(user_id, str(target_dir))
+                    adapter._set_session_id(user_id, None)  # Force new session for new directory
+
+                    # Try to find a resumable session for the new directory
+                    session_info = ""
+                    claude_integration = self.deps.get("claude_integration")
+                    if claude_integration:
+                        try:
+                            resumable = await claude_integration._find_resumable_session(user_id, target_dir)
+                            if resumable:
+                                adapter._set_session_id(user_id, resumable.session_id)
+                                session_info = "\n\n📋 已恢复之前的会话"
+                        except Exception:
+                            session_info = ""
+
+                    await adapter.send_message(chat_id, f"✅ 已切换到: <code>{repo_name}</code>{session_info}")
                 else:
                     await adapter.send_message(chat_id, f"❌ 目录不存在: <code>{repo_name}</code>")
             else:
-                # List available repos
+                # List available repos with git indicators
                 repos = []
-                for item in approved_dir.iterdir():
+                current_dir = self._user_settings.get(user_id, {}).get("working_directory", str(approved_dir))
+                for item in sorted(approved_dir.iterdir(), key=lambda x: x.name.lower()):
                     if item.is_dir() and not item.name.startswith("."):
-                        repos.append(item.name)
+                        has_git = (item / ".git").exists()
+                        marker = " ◀" if str(item) == current_dir else ""
+                        repos.append((item.name, has_git, marker))
 
                 if repos:
-                    repos_text = "\n".join(f"• <code>{r}</code>" for r in sorted(repos)[:20])
+                    repos_text = "\n".join(
+                        f"• {'📦' if has_git else '📁'} <code>{name}</code>{marker}"
+                        for name, has_git, marker in repos[:20]
+                    )
                     msg = f"📁 <b>可用项目:</b>\n\n{repos_text}"
                     if len(repos) > 20:
                         msg += f"\n\n... 还有 {len(repos) - 20} 个项目"
@@ -2081,8 +2125,10 @@ class MessageOrchestrator:
 
     async def _cmd_restart(self, adapter, chat_id: str) -> None:
         """Handle /restart command."""
+        import os
+        import signal
         await adapter.send_message(chat_id, "🔄 正在重启机器人...")
-        # The actual restart logic would be handled by the main application
+        os.kill(os.getpid(), signal.SIGTERM)
 
     async def _cmd_sync_threads(self, adapter, chat_id: str, settings) -> None:
         """Handle /sync_threads command."""
@@ -2137,6 +2183,8 @@ class MessageOrchestrator:
         try:
             if storage:
                 await storage.clear_user_session(user_id)
+            if hasattr(adapter, '_set_session_id'):
+                adapter._set_session_id(user_id, None)
             await adapter.send_message(chat_id, "🏁 会话已结束，上下文已清除。")
             if audit_logger:
                 await audit_logger.log_command(user_id, "end", [], True)
@@ -2150,10 +2198,13 @@ class MessageOrchestrator:
                 await adapter.send_message(chat_id, "⚠️ 配置不可用")
                 return
 
-            # Get working directory
-            work_dir = settings.approved_directory
-            if storage:
-                work_dir = await storage.get_user_setting(user_id, "working_directory", work_dir)
+            # Get working directory from adapter state first
+            work_dir_str = adapter._get_working_directory(user_id) if hasattr(adapter, '_get_working_directory') else None
+            if not work_dir_str:
+                work_dir = settings.approved_directory
+                if storage:
+                    work_dir_str = await storage.get_user_setting(user_id, "working_directory", str(work_dir))
+            work_dir = work_dir_str or str(settings.approved_directory)
 
             work_path = Path(work_dir)
             if not work_path.exists():
@@ -2280,16 +2331,36 @@ class MessageOrchestrator:
             if storage:
                 await storage.set_user_setting(user_id, "working_directory", str(target_dir))
 
-            await adapter.send_message(chat_id, f"✅ 已切换到: <code>{target_dir.relative_to(approved_path)}</code>")
+            # Also update adapter's internal state
+            adapter._set_working_directory(user_id, str(target_dir))
+            adapter._set_session_id(user_id, None)  # Force new session for new directory
+
+            # Try to find a resumable session for the new directory
+            claude_integration = self.deps.get("claude_integration")
+            if claude_integration:
+                try:
+                    resumable = await claude_integration._find_resumable_session(user_id, target_dir)
+                    if resumable:
+                        adapter._set_session_id(user_id, resumable.session_id)
+                        session_info = "\n\n📋 已恢复之前的会话"
+                    else:
+                        session_info = ""
+                except Exception:
+                    session_info = ""
+            else:
+                session_info = ""
+
+            await adapter.send_message(chat_id, f"✅ 已切换到: <code>{target_dir.relative_to(approved_path)}</code>{session_info}")
         except Exception as e:
             await adapter.send_message(chat_id, f"❌ 切换目录失败: {str(e)}")
 
     async def _cmd_pwd(self, adapter, chat_id: str, user_id: int, storage) -> None:
         """Handle /pwd command - print working directory."""
         try:
-            if storage:
+            work_dir = adapter._get_working_directory(user_id) if hasattr(adapter, '_get_working_directory') else None
+            if not work_dir and storage:
                 work_dir = await storage.get_user_setting(user_id, "working_directory", "未知")
-            else:
+            if not work_dir:
                 work_dir = "未知"
             await adapter.send_message(chat_id, f"📁 当前目录: <code>{work_dir}</code>")
         except Exception as e:
@@ -2329,49 +2400,84 @@ class MessageOrchestrator:
             await adapter.send_message(chat_id, f"❌ 获取项目失败: {str(e)}")
 
     async def _cmd_export(self, adapter, chat_id: str, user_id: int, format_type: str, storage) -> None:
-        """Handle /export command - export session."""
+        """Handle /export command - show format selection card or export directly."""
         try:
-            if storage is None:
-                await adapter.send_message(chat_id, "⚠️ 存储服务不可用")
-                return
+            if format_type in ("markdown", "json", "html"):
+                # Direct export with specified format
+                if storage is None:
+                    await adapter.send_message(chat_id, "⚠️ 存储服务不可用")
+                    return
 
-            # Get session messages
-            messages = await storage.get_session_messages(user_id)
-            if not messages:
-                await adapter.send_message(chat_id, "没有可导出的会话内容")
-                return
+                # Get session messages
+                messages = await storage.get_session_messages(user_id)
+                if not messages:
+                    await adapter.send_message(chat_id, "没有可导出的会话内容")
+                    return
 
-            # Format based on type
-            if format_type == "json":
-                import json
-                content = json.dumps(messages, indent=2, ensure_ascii=False, default=str)
+                # Format based on type
+                if format_type == "json":
+                    import json
+                    content = json.dumps(messages, indent=2, ensure_ascii=False, default=str)
+                else:
+                    # Markdown format
+                    lines = ["# 会话导出\n"]
+                    for msg in messages:
+                        role = msg.get("role", "unknown")
+                        content = msg.get("content", "")
+                        lines.append(f"## {role}\n\n{content}\n")
+                    content = "\n".join(lines)
+
+                # Send as file
+                await adapter.send_file(chat_id, content.encode(), filename=f"session_export.{format_type}")
             else:
-                # Markdown format
-                lines = ["# 会话导出\n"]
-                for msg in messages:
-                    role = msg.get("role", "unknown")
-                    content = msg.get("content", "")
-                    lines.append(f"## {role}\n\n{content}\n")
-                content = "\n".join(lines)
-
-            # Send as file
-            await adapter.send_file(chat_id, content.encode(), filename=f"session_export.{format_type}")
+                # Show format selection card
+                export_card = {
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "title": {"content": "📤 导出会话", "tag": "plain_text"},
+                        "template": "violet"
+                    },
+                    "elements": [
+                        {"tag": "div", "text": {"content": "请选择导出格式:", "tag": "lark_md"}},
+                        {
+                            "tag": "action_list",
+                            "list": [
+                                {"tag": "button", "text": {"content": "📝 Markdown", "tag": "plain_text"}, "type": "primary", "value": {"action": "export", "format": "markdown"}},
+                                {"tag": "button", "text": {"content": "📊 JSON", "tag": "plain_text"}, "type": "default", "value": {"action": "export", "format": "json"}},
+                                {"tag": "button", "text": {"content": "🌐 HTML", "tag": "plain_text"}, "type": "default", "value": {"action": "export", "format": "html"}},
+                            ]
+                        }
+                    ]
+                }
+                await adapter.send_card(chat_id, export_card)
         except Exception as e:
             await adapter.send_message(chat_id, f"❌ 导出失败: {str(e)}")
 
     async def _cmd_actions(self, adapter, chat_id: str, user_id: int, settings, storage) -> None:
-        """Handle /actions command - show quick actions."""
-        actions = [
-            ("🔍 代码审查", "请审查当前目录的代码"),
-            ("🧪 运行测试", "请运行项目测试"),
-            ("📝 生成文档", "请为项目生成 README"),
-            ("🔧 修复问题", "请检查并修复代码问题"),
-        ]
-        lines = ["⚡ <b>快速操作</b>\n"]
-        for emoji_name, prompt in actions:
-            lines.append(f"{emoji_name}\n<i>{prompt}</i>\n")
-        lines.append("\n💡 发送上述提示语或自定义消息与 Claude 对话")
-        await adapter.send_message(chat_id, "\n".join(lines))
+        """Handle /actions command - show quick actions as interactive card."""
+        actions_card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"content": "⚡ 快速操作", "tag": "plain_text"},
+                "template": "turquoise"
+            },
+            "elements": [
+                {
+                    "tag": "action_list",
+                    "list": [
+                        {"tag": "button", "text": {"content": "🔍 代码审查", "tag": "plain_text"}, "type": "primary", "value": {"action": "quick", "quick": "review"}},
+                        {"tag": "button", "text": {"content": "🧪 运行测试", "tag": "plain_text"}, "type": "primary", "value": {"action": "quick", "quick": "test"}},
+                        {"tag": "button", "text": {"content": "📝 生成文档", "tag": "plain_text"}, "type": "primary", "value": {"action": "quick", "quick": "docs"}},
+                        {"tag": "button", "text": {"content": "🔧 修复问题", "tag": "plain_text"}, "type": "primary", "value": {"action": "quick", "quick": "fix"}},
+                        {"tag": "button", "text": {"content": "🏗️ 构建", "tag": "plain_text"}, "type": "default", "value": {"action": "quick", "quick": "build"}},
+                        {"tag": "button", "text": {"content": "🚀 启动服务", "tag": "plain_text"}, "type": "default", "value": {"action": "quick", "quick": "start"}},
+                        {"tag": "button", "text": {"content": "🔍 Lint", "tag": "plain_text"}, "type": "default", "value": {"action": "quick", "quick": "lint"}},
+                        {"tag": "button", "text": {"content": "✨ 格式化", "tag": "plain_text"}, "type": "default", "value": {"action": "quick", "quick": "format"}},
+                    ]
+                }
+            ]
+        }
+        await adapter.send_card(chat_id, actions_card)
 
     async def _cmd_git(self, adapter, chat_id: str, user_id: int, git_cmd: str, settings, storage) -> None:
         """Handle /git command - git operations."""
@@ -2380,10 +2486,13 @@ class MessageOrchestrator:
                 await adapter.send_message(chat_id, "⚠️ 配置不可用")
                 return
 
-            # Get working directory
-            work_dir = Path(settings.approved_directory)
-            if storage:
-                work_dir = Path(await storage.get_user_setting(user_id, "working_directory", str(work_dir)))
+            # Get working directory from adapter state first, then storage
+            work_dir_str = adapter._get_working_directory(user_id) if hasattr(adapter, '_get_working_directory') else None
+            if not work_dir_str:
+                work_dir = Path(settings.approved_directory)
+                if storage:
+                    work_dir_str = await storage.get_user_setting(user_id, "working_directory", str(work_dir))
+            work_dir = Path(work_dir_str) if work_dir_str else Path(settings.approved_directory)
 
             # Check if it's a git repo
             git_dir = work_dir / ".git"
@@ -2402,12 +2511,16 @@ class MessageOrchestrator:
             elif git_cmd == "branch":
                 result = subprocess.run(["git", "branch"], cwd=work_dir, capture_output=True, text=True)
                 msg = f"🌿 <b>Git Branches</b>\n\n<pre>{result.stdout or '无分支'}</pre>"
+            elif git_cmd == "diff":
+                result = subprocess.run(["git", "diff", "--stat"], cwd=work_dir, capture_output=True, text=True)
+                msg = f"📊 <b>Git Diff</b>\n\n<pre>{result.stdout or '无变更'}</pre>"
             else:
                 msg = (
                     "🌳 <b>Git 命令</b>\n\n"
                     "• /git status - 查看状态\n"
                     "• /git log - 查看提交历史\n"
-                    "• /git branch - 查看分支"
+                    "• /git branch - 查看分支\n"
+                    "• /git diff - 查看变更统计"
                 )
 
             await adapter.send_message(chat_id, msg)

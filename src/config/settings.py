@@ -145,6 +145,58 @@ class Settings(BaseSettings):
         description="List of explicitly disallowed Claude tools/commands",
     )
 
+    # Retry settings for transient SDK errors
+    claude_retry_max_attempts: int = Field(
+        3,
+        description="Max retry attempts for transient SDK errors (0 = disabled)",
+        ge=0,
+        le=10,
+    )
+    claude_retry_base_delay: float = Field(
+        1.0,
+        description="Base delay in seconds before first retry",
+        ge=0.1,
+        le=60.0,
+    )
+    claude_retry_backoff_factor: float = Field(
+        3.0,
+        description="Multiplier for exponential backoff between retries",
+        ge=1.0,
+        le=10.0,
+    )
+    claude_retry_max_delay: float = Field(
+        30.0,
+        description="Maximum delay in seconds between retries",
+        ge=1.0,
+        le=300.0,
+    )
+
+    # Retry settings for transient SDK errors
+    claude_retry_max_attempts: int = Field(
+        3,
+        description="Max retry attempts for transient SDK errors (0=disabled)",
+        ge=0,
+        le=10,
+    )
+    claude_retry_base_delay: float = Field(
+        1.0,
+        description="Base delay in seconds before first retry",
+        ge=0.1,
+        le=60.0,
+    )
+    claude_retry_backoff_factor: float = Field(
+        3.0,
+        description="Multiplier applied to delay after each attempt",
+        ge=1.0,
+        le=10.0,
+    )
+    claude_retry_max_delay: float = Field(
+        30.0,
+        description="Maximum delay in seconds between retries",
+        ge=1.0,
+        le=300.0,
+    )
+
     # Sandbox settings
     sandbox_enabled: bool = Field(
         True,

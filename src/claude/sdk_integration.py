@@ -4,7 +4,7 @@ import asyncio
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 import structlog
 from claude_agent_sdk import (
@@ -20,6 +20,8 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     ProcessError,
     ResultMessage,
+    TextBlock,
+    ThinkingBlock,
     ToolPermissionContext,
     ToolUseBlock,
     UserMessage,
@@ -39,6 +41,9 @@ from .exceptions import (
 from .monitor import _is_claude_internal_path, check_bash_directory_boundary
 
 logger = structlog.get_logger()
+
+# Fallback message when Claude produces no text but did use tools.
+TASK_COMPLETED_MSG = "\u2705 Task completed. Tools used: {tools_summary}"
 
 
 @dataclass
@@ -62,8 +67,114 @@ class StreamUpdate:
 
     type: str  # 'assistant', 'user', 'system', 'result', 'stream_delta'
     content: Optional[str] = None
-    tool_calls: Optional[List[Dict]] = None
-    metadata: Optional[Dict] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    metadata: Optional[Dict[str, Any]] = None
+    progress: Optional[Dict[str, Any]] = None
+
+    def get_tool_names(self) -> List[str]:
+        """Return tool names from the stream payload."""
+        names: List[str] = []
+
+        if self.tool_calls:
+            for tool_call in self.tool_calls:
+                name = tool_call.get("name") if isinstance(tool_call, dict) else None
+                if isinstance(name, str) and name:
+                    names.append(name)
+
+        if self.metadata:
+            tool_name = self.metadata.get("tool_name")
+            if isinstance(tool_name, str) and tool_name:
+                names.append(tool_name)
+
+            metadata_tools = self.metadata.get("tools")
+            if isinstance(metadata_tools, list):
+                for tool in metadata_tools:
+                    if isinstance(tool, dict):
+                        name = tool.get("name")
+                    elif isinstance(tool, str):
+                        name = tool
+                    else:
+                        name = None
+
+                    if isinstance(name, str) and name:
+                        names.append(name)
+
+        # Preserve insertion order while de-duplicating.
+        return list(dict.fromkeys(names))
+
+    def is_error(self) -> bool:
+        """Check whether this stream update represents an error."""
+        if self.type == "error":
+            return True
+
+        if self.metadata:
+            if self.metadata.get("is_error") is True:
+                return True
+            status = self.metadata.get("status")
+            if isinstance(status, str) and status.lower() == "error":
+                return True
+            error_val = self.metadata.get("error")
+            if isinstance(error_val, str) and error_val:
+                return True
+            error_msg_val = self.metadata.get("error_message")
+            if isinstance(error_msg_val, str) and error_msg_val:
+                return True
+
+        if self.progress:
+            status = self.progress.get("status")
+            if isinstance(status, str) and status.lower() == "error":
+                return True
+
+        return False
+
+    def get_error_message(self) -> str:
+        """Get the best available error message from the stream payload."""
+        if self.metadata:
+            for key in ("error_message", "error", "message"):
+                value = self.metadata.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+
+        if isinstance(self.content, str) and self.content.strip():
+            return self.content
+
+        if self.progress:
+            value = self.progress.get("error")
+            if isinstance(value, str) and value.strip():
+                return value
+
+        return "Unknown error"
+
+    def get_progress_percentage(self) -> Optional[int]:
+        """Extract progress percentage if present."""
+
+        def _to_int(value: Any) -> Optional[int]:
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, str) and value.strip():
+                try:
+                    return int(float(value))
+                except ValueError:
+                    return None
+            return None
+
+        if self.progress:
+            for key in ("percentage", "percent", "progress"):
+                percentage = _to_int(self.progress.get(key))
+                if percentage is not None:
+                    return max(0, min(100, percentage))
+
+            step = _to_int(self.progress.get("step"))
+            total_steps = _to_int(self.progress.get("total_steps"))
+            if step is not None and total_steps and total_steps > 0:
+                return max(0, min(100, int((step / total_steps) * 100)))
+
+        if self.metadata:
+            percentage = _to_int(self.metadata.get("progress_percentage"))
+            if percentage is not None:
+                return max(0, min(100, percentage))
+
+        return None
 
 
 def _make_can_use_tool_callback(
@@ -147,6 +258,17 @@ class ClaudeSDKManager:
         else:
             logger.info("No API key provided, using existing Claude CLI authentication")
 
+    def _is_retryable_error(self, exc: BaseException) -> bool:
+        """Return True for transient errors that warrant a retry.
+
+        asyncio.TimeoutError is intentional (user-configured timeout) -- not retried.
+        Only non-MCP CLIConnectionError is considered transient.
+        """
+        if isinstance(exc, CLIConnectionError):
+            msg = str(exc).lower()
+            return "mcp" not in msg
+        return False
+
     async def execute_command(
         self,
         prompt: str,
@@ -155,6 +277,7 @@ class ClaudeSDKManager:
         continue_session: bool = False,
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
         interrupt_event: Optional[asyncio.Event] = None,
+        images: Optional[List[Dict[str, str]]] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -212,7 +335,7 @@ class ClaudeSDKManager:
                     "excludedCommands": self.config.sandbox_excluded_commands or [],
                 },
                 system_prompt=base_prompt,
-                setting_sources=["project"],
+                setting_sources=["user", "project"],
                 stderr=_stderr_callback,
             )
 
@@ -248,7 +371,38 @@ class ClaudeSDKManager:
                 client = ClaudeSDKClient(options)
                 try:
                     await client.connect()
-                    await client.query(prompt)
+
+                    if images:
+                        # Build multimodal content blocks for image analysis
+                        content_blocks: List[Dict[str, Any]] = []
+                        for img in images:
+                            media_type = img.get("media_type", "image/png")
+                            content_blocks.append(
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": img["data"],
+                                    },
+                                }
+                            )
+                        content_blocks.append({"type": "text", "text": prompt})
+
+                        multimodal_msg = {
+                            "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": content_blocks,
+                            },
+                        }
+
+                        async def _multimodal_prompt() -> AsyncIterator[Dict[str, Any]]:
+                            yield multimodal_msg
+
+                        await client.query(_multimodal_prompt())
+                    else:
+                        await client.query(prompt)
 
                     async for raw_data in client._query.receive_messages():
                         try:
@@ -280,43 +434,82 @@ class ClaudeSDKManager:
                 finally:
                     await client.disconnect()
 
-            # Execute: race client against timeout and optional interrupt
-            run_task = asyncio.create_task(_run_client())
+            # Execute with timeout and retry, racing against optional interrupt
+            max_attempts = max(1, self.config.claude_retry_max_attempts)
+            last_exc: Optional[BaseException] = None
 
-            interrupt_watcher: Optional["asyncio.Task[None]"] = None
-            if interrupt_event is not None:
+            for attempt in range(max_attempts):
+                # Reset message accumulator each attempt so that a failed attempt
+                # does not pollute the next one with partial/duplicate messages.
+                messages.clear()
 
-                async def _cancel_on_interrupt() -> None:
-                    nonlocal interrupted
-                    await interrupt_event.wait()
-                    interrupted = True
+                if attempt > 0:
+                    delay = min(
+                        self.config.claude_retry_base_delay
+                        * (self.config.claude_retry_backoff_factor ** (attempt - 1)),
+                        self.config.claude_retry_max_delay,
+                    )
+                    logger.warning(
+                        "Retrying Claude SDK command",
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        delay_seconds=delay,
+                    )
+                    await asyncio.sleep(delay)
+
+                run_task = asyncio.create_task(_run_client())
+
+                interrupt_watcher: Optional["asyncio.Task[None]"] = None
+                if interrupt_event is not None:
+
+                    async def _cancel_on_interrupt() -> None:
+                        nonlocal interrupted
+                        await interrupt_event.wait()
+                        interrupted = True
+                        run_task.cancel()
+
+                    interrupt_watcher = asyncio.create_task(_cancel_on_interrupt())
+
+                # Note: asyncio.TimeoutError is intentionally NOT retried --
+                # it reflects a user-configured hard limit.
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(run_task),
+                        timeout=self.config.claude_timeout_seconds,
+                    )
+                    break  # success -- exit retry loop
+                except asyncio.CancelledError:
+                    if not interrupted:
+                        raise
+                    # Interrupt cancelled the task -- wait for cleanup
+                    try:
+                        await run_task
+                    except asyncio.CancelledError:
+                        pass
+                    break  # user interrupted -- don't retry
+                except asyncio.TimeoutError:
                     run_task.cancel()
-
-                interrupt_watcher = asyncio.create_task(_cancel_on_interrupt())
-
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(run_task),
-                    timeout=self.config.claude_timeout_seconds,
-                )
-            except asyncio.CancelledError:
-                if not interrupted:
-                    raise
-                # Interrupt cancelled the task — wait for cleanup
-                try:
-                    await run_task
-                except asyncio.CancelledError:
-                    pass
-            except asyncio.TimeoutError:
-                run_task.cancel()
-                try:
-                    await run_task
-                except asyncio.CancelledError:
-                    pass
-                raise
-            finally:
-                if interrupt_watcher is not None:
-                    interrupt_watcher.cancel()
+                    try:
+                        await run_task
+                    except asyncio.CancelledError:
+                        pass
+                    raise  # timeout -- don't retry
+                except CLIConnectionError as exc:
+                    if self._is_retryable_error(exc) and attempt < max_attempts - 1:
+                        last_exc = exc
+                        logger.warning(
+                            "Transient connection error, will retry",
+                            attempt=attempt + 1,
+                            error=str(exc),
+                        )
+                        continue
+                    raise  # non-retryable or attempts exhausted
+                finally:
+                    if interrupt_watcher is not None:
+                        interrupt_watcher.cancel()
+            else:
+                if last_exc is not None:
+                    raise last_exc
 
             # Extract cost, tools, and session_id from result message
             cost = 0.0
@@ -337,11 +530,9 @@ class ClaudeSDKManager:
                                     if isinstance(block, ToolUseBlock):
                                         tools_used.append(
                                             {
-                                                "name": getattr(
-                                                    block, "name", "unknown"
-                                                ),
+                                                "name": block.name,
                                                 "timestamp": current_time,
-                                                "input": getattr(block, "input", {}),
+                                                "input": block.input,
                                             }
                                         )
                     break
@@ -374,7 +565,7 @@ class ClaudeSDKManager:
 
             # Use ResultMessage.result if available, fall back to message extraction
             if result_content is not None:
-                content = result_content
+                content = str(result_content).strip()
             else:
                 content_parts = []
                 for msg in messages:
@@ -382,11 +573,24 @@ class ClaudeSDKManager:
                         msg_content = getattr(msg, "content", [])
                         if msg_content and isinstance(msg_content, list):
                             for block in msg_content:
-                                if hasattr(block, "text"):
+                                if isinstance(block, TextBlock):
                                     content_parts.append(block.text)
+                                elif isinstance(block, ThinkingBlock):
+                                    content_parts.append(block.thinking)
                         elif msg_content:
                             content_parts.append(str(msg_content))
-                content = "\n".join(content_parts)
+                content = "\n".join(content_parts).strip()
+
+            # Fallback when Claude produced no text but did use tools
+            if not content and tools_used:
+                tool_names = [
+                    tool.get("name", "")
+                    for tool in tools_used
+                    if isinstance(tool.get("name"), str) and tool.get("name")
+                ]
+                unique_tool_names = list(dict.fromkeys(tool_names))
+                tools_summary = ", ".join(unique_tool_names) or "unknown"
+                content = TASK_COMPLETED_MSG.format(tools_summary=tools_summary)
 
             return ClaudeResponse(
                 content=content,
@@ -488,21 +692,23 @@ class ClaudeSDKManager:
             if isinstance(message, AssistantMessage):
                 # Extract content from assistant message
                 content = getattr(message, "content", [])
-                text_parts = []
-                tool_calls = []
+                text_parts: List[str] = []
+                tool_calls: List[Dict[str, Any]] = []
 
                 if content and isinstance(content, list):
                     for block in content:
                         if isinstance(block, ToolUseBlock):
                             tool_calls.append(
                                 {
-                                    "name": getattr(block, "name", "unknown"),
-                                    "input": getattr(block, "input", {}),
-                                    "id": getattr(block, "id", None),
+                                    "name": block.name,
+                                    "input": block.input,
+                                    "id": block.id,
                                 }
                             )
-                        elif hasattr(block, "text"):
+                        elif isinstance(block, TextBlock):
                             text_parts.append(block.text)
+                        elif isinstance(block, ThinkingBlock):
+                            text_parts.append(block.thinking)
 
                 if text_parts or tool_calls:
                     update = StreamUpdate(

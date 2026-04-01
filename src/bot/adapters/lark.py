@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 from datetime import datetime
 
@@ -98,6 +99,7 @@ class LarkAdapter(PlatformAdapter):
         self.ws_client: Optional[Any] = None  # lark.ws.Client
         self._is_running = False
         self._stop_event = asyncio.Event()
+        self._event_handlers: List[Callable] = []  # Event handlers
         self._command_handlers: List[Callable] = []  # Command handlers
         self._message_handlers: List[Callable] = []  # Message handlers
         self._callback_handlers: List[Callable] = []  # Callback handlers
@@ -107,6 +109,23 @@ class LarkAdapter(PlatformAdapter):
         self.core_engine: Optional[Any] = None  # CoreEngine instance
         self.settings: Optional[Any] = None  # Settings instance
         self._stop_callbacks: Dict[int, asyncio.Event] = {}  # user_id -> interrupt event
+
+        # Per-user state: working directory, session ID, etc.
+        # Mirrors Telegram's context.user_data for platform-agnostic features.
+        self._user_data: Dict[int, Dict[str, Any]] = {}
+
+        # Reference to orchestrator for user settings access
+        self._orchestrator_ref: Optional[Any] = None
+
+    @property
+    def orchestrator(self):
+        """Get orchestrator reference."""
+        return self._orchestrator_ref
+
+    @orchestrator.setter
+    def orchestrator(self, value):
+        """Set orchestrator reference."""
+        self._orchestrator_ref = value
 
     async def initialize(self) -> None:
         """Initialize Lark client."""
@@ -142,6 +161,7 @@ class LarkAdapter(PlatformAdapter):
             chat_id = message.get("chat_id", "")
             msg_type = message.get("msg_type", "text")
             content_raw = message.get("content", "{}")
+            open_id = sender.get("open_id", "")
 
             # Parse content
             try:
@@ -175,6 +195,16 @@ class LarkAdapter(PlatformAdapter):
                 }
                 text = "[用户上传了一张图片]"
                 logger.info("Received image message", image_key=image_key)
+            elif msg_type == "audio":
+                # Voice/audio message
+                file_key = content.get("file_key", "")
+                file_info = {
+                    "type": "audio",
+                    "file_key": file_key,
+                    "duration": content.get("duration", 0),
+                }
+                text = "[语音消息]"
+                logger.info("Received audio message", file_key=file_key)
             else:
                 # Unknown message type, skip
                 logger.info("Skipping unsupported message type", msg_type=msg_type)
@@ -194,33 +224,43 @@ class LarkAdapter(PlatformAdapter):
 
             # Dispatch to appropriate handler via main loop
             if self._main_loop and not self._main_loop.is_closed():
+                # Voice messages get special handling
+                if file_info and file_info.get("type") == "audio":
+                    asyncio.run_coroutine_threadsafe(
+                        self._handle_voice_message(chat_id, file_info, sender),
+                        self._main_loop
+                    )
                 # Check if message is a command (starts with /)
-                is_command = text.strip().startswith("/")
-
-                if is_command and self._command_handlers:
-                    # Route to command handlers
-                    logger.info("Routing to command handler", text=text[:30])
-                    asyncio.run_coroutine_threadsafe(
-                        self._dispatch_to_handlers(event_data, self._command_handlers),
-                        self._main_loop
-                    )
+                elif text.strip().startswith("/"):
+                    # ALL commands go through orchestrator's handle_command
+                    # This ensures persistent storage, security checks, and feature parity
+                    if self._command_handlers:
+                        for handler in self._command_handlers:
+                            future = asyncio.run_coroutine_threadsafe(
+                                handler(event_data), self._main_loop
+                            )
+                            future.add_done_callback(lambda f: f.exception() if f.exception() else None)
+                    else:
+                        logger.warning("No command handlers registered", text=text[:30])
                 elif self._message_handlers:
-                    # Route to message handlers
-                    logger.info("Routing to message handler", text=text[:30])
-                    asyncio.run_coroutine_threadsafe(
-                        self._dispatch_to_handlers(event_data, self._message_handlers),
-                        self._main_loop
-                    )
-                else:
-                    # Fallback: use core engine directly
+                    # Route to message handlers (orchestrator's handle_message)
+                    for handler in self._message_handlers:
+                        future = asyncio.run_coroutine_threadsafe(
+                            handler(event_data), self._main_loop
+                        )
+                        future.add_done_callback(lambda f: f.exception() if f.exception() else None)
+                elif hasattr(self, '_process_with_core_engine') and self.core_engine:
+                    # Fallback: process with core engine directly
                     logger.warning("No handlers registered, using core engine fallback")
-                    asyncio.run_coroutine_threadsafe(
-                        self._process_with_core_engine(chat_id, text, sender, file_info),
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._process_with_core_engine(chat_id, text, sender, file_info=file_info),
                         self._main_loop
                     )
+                    future.add_done_callback(lambda f: f.exception() if f.exception() else None)
 
         except Exception as e:
             logger.error("Error processing Lark message event", error=str(e), exc_info=True)
+
 
     async def _dispatch_to_handlers(
         self,
@@ -233,6 +273,82 @@ class LarkAdapter(PlatformAdapter):
                 await handler(event_data)
             except Exception as e:
                 logger.error("Handler error", error=str(e), exc_info=True)
+
+    async def _handle_voice_message(
+        self,
+        chat_id: str,
+        file_info: Dict[str, Any],
+        sender: Dict[str, Any],
+    ) -> None:
+        """Handle voice message by transcribing and sending to Claude."""
+        try:
+            file_key = file_info.get("file_key", "")
+            if not file_key:
+                await self.send_message(chat_id, "无法获取语音文件")
+                return
+
+            # Download audio
+            audio_bytes = await self.download_file(file_key)
+            if not audio_bytes:
+                await self.send_message(chat_id, "语音下载失败")
+                return
+
+            # Transcribe using configured provider
+            transcription = await self._transcribe_audio(audio_bytes)
+            if not transcription:
+                await self.send_message(chat_id, "语音转文字失败")
+                return
+
+            # Send transcription as message to Claude
+            text = f"[语音转文字]: {transcription}"
+
+            await self.send_message(chat_id, f"语音识别: {transcription}")
+
+            # Process with core engine
+            await self._process_with_core_engine(chat_id, text, sender)
+
+        except Exception as e:
+            logger.error("Voice message handling failed", error=str(e))
+            await self.send_message(chat_id, f"语音处理失败: {str(e)}")
+
+    async def _transcribe_audio(self, audio_bytes: bytes) -> Optional[str]:
+        """Transcribe audio using configured provider."""
+        import base64
+
+        settings = self.settings
+        if not settings:
+            return None
+
+        provider = getattr(settings, 'voice_provider', 'mistral')
+
+        try:
+            if provider == "openai" and getattr(settings, 'openai_api_key', None):
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        "https://api.openai.com/v1/audio/transcriptions",
+                        headers={"Authorization": f"Bearer {settings.openai_api_key.get_secret_value()}"},
+                        files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
+                        data={"model": getattr(settings, 'resolved_voice_model', 'whisper-1')},
+                    )
+                    if response.status_code == 200:
+                        return response.json().get("text", "")
+
+            elif provider == "mistral" and getattr(settings, 'mistral_api_key', None):
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        "https://api.mistral.ai/v1/audio/transcriptions",
+                        headers={"Authorization": f"Bearer {settings.mistral_api_key.get_secret_value()}"},
+                        files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
+                        data={"model": getattr(settings, 'resolved_voice_model', 'mistral')},
+                    )
+                    if response.status_code == 200:
+                        return response.json().get("text", "")
+        except Exception as e:
+            logger.error("Audio transcription failed", provider=provider, error=str(e))
+
+        return None
 
     async def _process_with_core_engine(
         self,
@@ -288,7 +404,7 @@ class LarkAdapter(PlatformAdapter):
 
                     image_data = await self.download_image(image_key)
                     if image_data:
-                        # Process image
+                        # Process image for text description
                         text = await self._process_image_content(image_data, text)
                     else:
                         await self.send_message(chat_id, "无法下载图片")
@@ -299,15 +415,51 @@ class LarkAdapter(PlatformAdapter):
                 await self.send_message(chat_id, f"处理文件时出错: {str(e)}")
                 return
 
+        # Prepare base64 image data for Claude's multimodal API
+        # Reuse the image data already downloaded during file processing
+        images = None
+        if file_info and file_info.get("type") == "image":
+            image_key = file_info.get("image_key", "")
+            if image_key:
+                try:
+                    # If we already downloaded the image above, reuse it;
+                    # otherwise download now
+                    if 'image_data' in dir() and image_data:
+                        img_bytes = image_data
+                    else:
+                        img_bytes = await self.download_image(image_key)
+                    if img_bytes:
+                        import base64
+                        images = [{
+                            "data": base64.b64encode(img_bytes).decode("utf-8"),
+                            "media_type": "image/png",
+                        }]
+                except Exception as e:
+                    logger.warning("Failed to prepare base64 image", error=str(e))
+
+        # Get verbose level from orchestrator's user settings
+        verbose_level = 1
+        if hasattr(self, '_orchestrator_ref') and self._orchestrator_ref:
+            user_settings = getattr(self._orchestrator_ref, '_user_settings', {})
+            verbose_level = user_settings.get(user_id, {}).get("verbose_level", 1)
+
+        working_dir = self._get_working_directory(user_id)
+        session_id = self._get_session_id(user_id)
+
         ctx = MessageContext(
             user_id=user_id,
             chat_id=chat_id,
             text=text,
-            working_directory=self.settings.approved_directory,
-            username=sender.get("user_id", ""),
+            working_directory=working_dir,
+            username=sender.get("nickname", sender.get("user_id", "")),
             is_private=True,
             platform="lark",
+            session_id=session_id,
         )
+        # Attach verbose_level and images as attributes
+        ctx.verbose_level = verbose_level  # type: ignore[attr-defined]
+        if images:
+            ctx.images = images  # type: ignore[attr-defined]
 
         interrupt_event = asyncio.Event()
         start_time = time.time()
@@ -321,11 +473,60 @@ class LarkAdapter(PlatformAdapter):
 
         # Track content and update state
         full_content = [""]
+        tool_lines: List[str] = []  # Track tool calls for nice display
         update_sequence = [1]  # Start from 1 (0 might fail - card not ready)
         last_update_time = [0.0]  # Track last update time for throttling
 
         # Wait for card to be ready before first update (1s to ensure card is fully created)
         await asyncio.sleep(1.0)
+
+        # Tool icon mapping (mirrors Telegram's display style)
+        TOOL_ICONS: Dict[str, str] = {
+            "Read": "📖",
+            "read_file": "📖",
+            "Write": "✏️",
+            "write": "✏️",
+            "create_file": "✏️",
+            "Edit": "✏️",
+            "edit_file": "✏️",
+            "Bash": "💻",
+            "bash": "💻",
+            "shell": "💻",
+            "Glob": "🔍",
+            "glob": "🔍",
+            "Grep": "🔍",
+            "grep": "🔍",
+            "search": "🔍",
+            "WebFetch": "🌐",
+            "web_fetch": "🌐",
+            "WebSearch": "🔍",
+            "web_search": "🔍",
+            "List": "📂",
+            "list": "📂",
+            "directory": "📂",
+            "mcp__": "🔌",
+            "TodoRead": "📋",
+            "TodoWrite": "📋",
+        }
+
+        def _get_tool_icon(tool_name: str) -> str:
+            """Get emoji icon for a tool name."""
+            for key, icon in TOOL_ICONS.items():
+                if tool_name.lower().startswith(key.lower()):
+                    return icon
+            return "🔧"
+
+        def _build_display_content() -> str:
+            """Build the full display content combining tool lines and text."""
+            parts = []
+            # Add recent tool calls (last 8)
+            recent_tools = tool_lines[-8:] if tool_lines else []
+            for tl in recent_tools:
+                parts.append(tl)
+            # Add response text
+            if full_content[0]:
+                parts.append(full_content[0])
+            return "\n\n".join(parts) if parts else "Thinking..."
 
         # Helper to format content with timer/status prefix
         def format_with_status(content: str, status: str, elapsed: float) -> str:
@@ -339,15 +540,31 @@ class LarkAdapter(PlatformAdapter):
 
             content_changed = False
             if event.type == "progress" and event.tool_name:
-                full_content[0] += f"[{event.tool_name}]\n"
+                # Format tool call with emoji icon and input preview
+                icon = _get_tool_icon(event.tool_name)
+                tool_input_preview = ""
+                if event.tool_input:
+                    # Show a short preview of the tool input
+                    preview = str(event.tool_input).replace("\n", " ")
+                    if len(preview) > 80:
+                        preview = preview[:77] + "..."
+                    tool_input_preview = f" — `{preview}`"
+
+                tool_line = f"{icon} **{event.tool_name}**{tool_input_preview}"
+                tool_lines.append(tool_line)
                 content_changed = True
             elif event.type == "response" and event.content:
                 content = event.content
-                if not (content.startswith("[ThinkingBlock") or content.startswith("[ContentBlock")):
-                    full_content[0] += content
-                    content_changed = True
+                # Filter out SDK internal messages
+                if content.startswith("[ThinkingBlock") or content.startswith("[ContentBlock"):
+                    return
+                if content.startswith("[") and "]" in content[:30] and not content.startswith("[Error"):
+                    # Likely an SDK metadata line, skip it
+                    return
+                full_content[0] += content
+                content_changed = True
             elif event.type == "error":
-                full_content[0] += f"\n[Error] {event.content}\n"
+                full_content[0] += f"\n❌ **Error:** {event.content}\n"
                 content_changed = True
 
             # Throttle updates: at most every 150ms (like OpenClaw's CARDKIT_MS)
@@ -355,7 +572,8 @@ class LarkAdapter(PlatformAdapter):
                 now = time.time()
                 if now - last_update_time[0] >= 0.15:
                     elapsed = now - start_time
-                    display = format_with_status(full_content[0] or "Thinking...", "⏱ 处理中...", elapsed)
+                    display = _build_display_content()
+                    display = format_with_status(display, "⏱ 处理中...", elapsed)
                     await self._update_card_content(card_id, display, update_sequence[0])
                     update_sequence[0] += 1
                     last_update_time[0] = now
@@ -376,6 +594,18 @@ class LarkAdapter(PlatformAdapter):
             else:
                 status = "❌ 出错"
 
+            # Save session_id for continuation
+            if response.session_id:
+                self._set_session_id(user_id, response.session_id)
+
+                # Also persist working directory and session to storage if available
+                if self.settings and hasattr(self, 'storage') and self.storage:
+                    try:
+                        await self.storage.set_user_setting(user_id, "working_directory", str(working_dir))
+                        await self.storage.set_user_setting(user_id, "claude_session_id", response.session_id)
+                    except Exception as e:
+                        logger.warning("Failed to persist session", error=str(e))
+
             # Always use response.content as final text (it's complete)
             final_text = response.content if response.content else full_content[0]
             if response.interrupted:
@@ -383,8 +613,11 @@ class LarkAdapter(PlatformAdapter):
 
             logger.info("Final response", content_len=len(final_text), response_len=len(response.content or ""))
 
-            # Final update with status
-            final_display = format_with_status(final_text, status, elapsed)
+            # Final update with status — build full display including tool lines
+            if response.content:
+                full_content[0] = response.content
+            final_display = _build_display_content()
+            final_display = format_with_status(final_display, status, elapsed)
             await self._update_card_content(card_id, final_display, update_sequence[0])
             await self._close_streaming_mode(card_id, update_sequence[0] + 1)
 
@@ -733,13 +966,21 @@ class LarkAdapter(PlatformAdapter):
                 return
             if event.type == "response" and event.content:
                 content = event.content
-                if not (content.startswith("[ThinkingBlock") or content.startswith("[ContentBlock")):
-                    full_content += content
+                # Filter out SDK internal messages
+                if content.startswith("[ThinkingBlock") or content.startswith("[ContentBlock"):
+                    return
+                if content.startswith("[") and "]" in content[:30] and not content.startswith("[Error"):
+                    return
+                full_content += content
 
         try:
             response = await self.core_engine.process_message(
                 ctx, on_stream, interrupt_event=interrupt_event
             )
+
+            # Save session_id for continuation
+            if response.session_id:
+                self._set_session_id(user_id, response.session_id)
 
             elapsed = time.time() - start_time
             status = "Done" if response.success else ("Interrupted" if response.interrupted else "Error")
@@ -977,28 +1218,31 @@ class LarkAdapter(PlatformAdapter):
                     interrupt_event = self._stop_callbacks[user_id]
                     interrupt_event.set()
                     logger.info("Stop requested", user_id=user_id)
-                    # Return success response with toast
                     return P2CardActionTriggerResponse({
-                        "toast": {
-                            "type": "info",
-                            "content": "正在中断请求..."
-                        }
+                        "toast": {"type": "info", "content": "正在中断请求..."}
                     })
                 else:
                     logger.warning("No stop callback for user", user_id=user_id)
                     return P2CardActionTriggerResponse({
-                        "toast": {
-                            "type": "warning",
-                            "content": "没有正在进行的请求"
-                        }
+                        "toast": {"type": "warning", "content": "没有正在进行的请求"}
                     })
 
-            # Default success response
+            # Handle other actions via async dispatch to main loop
+            action_param = action_value.get("param", "") if isinstance(action_value, dict) else ""
+            open_chat_id = ""
+            if hasattr(data, 'event') and hasattr(data.event, 'operator_id'):
+                # Try to extract chat_id from the event
+                pass
+
+            if action_type and self._main_loop and not self._main_loop.is_closed():
+                asyncio.run_coroutine_threadsafe(
+                    self._handle_card_action_async(action_type, action_param, user_id),
+                    self._main_loop
+                )
+
+            # Default response
             return P2CardActionTriggerResponse({
-                "toast": {
-                    "type": "info",
-                    "content": "操作已收到"
-                }
+                "toast": {"type": "info", "content": "操作已收到"}
             })
 
         except Exception as e:
@@ -1010,6 +1254,110 @@ class LarkAdapter(PlatformAdapter):
                     "content": f"处理失败: {str(e)}"
                 }
             })
+
+    async def _handle_card_action_async(
+        self, action_type: str, action_param: str, user_id: Optional[int]
+    ) -> None:
+        """Handle card button actions asynchronously (dispatched from WebSocket and webhook)."""
+        if not self.settings:
+            return
+
+        try:
+            if action_type == "cd":
+                # CD action — change directory
+                if not action_param:
+                    return
+                user_data = self._get_user_data(user_id) if user_id else {}
+                current_dir = Path(self._get_working_directory(user_id)) if user_id else Path(self.settings.approved_directory)
+                approved_dir = Path(self.settings.approved_directory)
+
+                try:
+                    if action_param == "/":
+                        resolved = approved_dir
+                    elif action_param == "..":
+                        resolved = current_dir.parent
+                        try:
+                            resolved.relative_to(approved_dir.resolve())
+                        except ValueError:
+                            resolved = approved_dir
+                    else:
+                        resolved = (current_dir / action_param).resolve()
+                        try:
+                            resolved.relative_to(approved_dir.resolve())
+                        except ValueError:
+                            return
+
+                    if resolved.exists() and resolved.is_dir():
+                        if user_id:
+                            self._set_working_directory(user_id, str(resolved))
+                            self._set_session_id(user_id, None)
+                        try:
+                            relative = resolved.relative_to(approved_dir)
+                            display = "/" if str(relative) == "." else f"{relative}/"
+                        except ValueError:
+                            display = str(resolved)
+                        logger.info("CD via card callback", directory=str(resolved))
+                    else:
+                        logger.warning("CD target not found", target=action_param)
+                except Exception as e:
+                    logger.error("CD callback error", error=str(e))
+
+            elif action_type == "action":
+                # Generic action — dispatch as command through command handlers
+                action_map = {
+                    "show_projects": "/projects",
+                    "help": "/help",
+                    "new_session": "/new",
+                    "status": "/status",
+                    "ls": "/ls",
+                    "refresh_status": "/status",
+                    "refresh_ls": "/ls",
+                }
+                cmd_text = action_map.get(action_param)
+                if cmd_text and self._command_handlers:
+                    # Simulate as a message event and dispatch through command handlers
+                    event_data = {
+                        "type": "im.message.receive_v1",
+                        "message": {
+                            "chat_id": "",
+                            "content": json.dumps({"text": cmd_text}),
+                            "msg_type": "text",
+                        },
+                        "sender": {"open_id": str(user_id or 0)},
+                    }
+                    for handler in self._command_handlers:
+                        try:
+                            await handler(event_data)
+                        except Exception as e:
+                            logger.error("Card action handler error", error=str(e))
+                else:
+                    logger.warning("Unknown card action or no command handlers", action=action_param)
+
+            elif action_type == "quick":
+                # Quick actions — send prompt to Claude
+                quick_prompts = {
+                    "review": "请审查当前目录的代码",
+                    "test": "请运行项目测试",
+                    "docs": "请为项目生成 README 文档",
+                    "fix": "请检查并修复代码问题",
+                    "build": "请构建项目",
+                    "start": "请启动开发服务器",
+                    "lint": "请运行代码检查",
+                    "format": "请格式化代码",
+                }
+                prompt = quick_prompts.get(action_param)
+                if prompt and user_id:
+                    # Route through core engine
+                    sender = {"open_id": str(user_id)}
+                    await self._process_with_core_engine("", prompt, sender)
+                else:
+                    logger.warning("Unknown quick action", action=action_param)
+
+            else:
+                logger.debug("Unrecognized card action type", action_type=action_type)
+
+        except Exception as e:
+            logger.error("Error in card action handler", error=str(e), exc_info=True)
 
     async def handle_card_callback(self, payload: Dict[str, Any]) -> None:
         """Handle card action callback from webhook.
@@ -2208,6 +2556,34 @@ class LarkAdapter(PlatformAdapter):
     def get_client(self) -> Optional[Client]:
         """Get the underlying Lark client."""
         return self.client
+
+    def _get_user_data(self, user_id: int) -> Dict[str, Any]:
+        """Get or create per-user state dict (mirrors Telegram's context.user_data)."""
+        if user_id not in self._user_data:
+            self._user_data[user_id] = {
+                "current_directory": None,
+                "claude_session_id": None,
+                "session_started": False,
+                "force_new_session": False,
+            }
+        return self._user_data[user_id]
+
+    def _get_working_directory(self, user_id: int) -> str:
+        """Get current working directory for a user."""
+        user_data = self._get_user_data(user_id)
+        return user_data.get("current_directory") or self.settings.approved_directory
+
+    def _set_working_directory(self, user_id: int, path: str) -> None:
+        """Set current working directory for a user."""
+        self._get_user_data(user_id)["current_directory"] = path
+
+    def _get_session_id(self, user_id: int) -> Optional[str]:
+        """Get Claude session ID for a user."""
+        return self._get_user_data(user_id).get("claude_session_id")
+
+    def _set_session_id(self, user_id: int, session_id: Optional[str]) -> None:
+        """Set Claude session ID for a user."""
+        self._get_user_data(user_id)["claude_session_id"] = session_id
 
     def is_adapter_running(self) -> bool:
         """Check if adapter is running."""

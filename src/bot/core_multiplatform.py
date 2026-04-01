@@ -59,6 +59,12 @@ class MultiPlatformBot:
             self.adapter.core_engine = self.core_engine
         if hasattr(self.adapter, "settings"):
             self.adapter.settings = self.settings
+        # Inject orchestrator reference (for verbose_level and user settings)
+        if hasattr(self.adapter, "orchestrator"):
+            self.adapter.orchestrator = self.orchestrator
+        # Inject storage reference (for session persistence)
+        if hasattr(self.adapter, "storage"):
+            self.adapter.storage = self.deps.get("storage")
 
         # Add adapter to deps so handlers can reply
         self.deps["adapter"] = self.adapter

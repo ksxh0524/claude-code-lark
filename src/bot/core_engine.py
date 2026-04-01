@@ -33,6 +33,8 @@ class MessageContext:
     is_private: bool = True  # Private chat vs group
     message_id: Optional[str] = None  # Original message ID for reply
     platform: str = "unknown"  # Platform name for logging
+    verbose_level: int = 1  # Output verbosity: 0=quiet, 1=normal, 2=detailed
+    images: Optional[List[Dict[str, str]]] = None  # Multimodal image data for Claude
 
 
 @dataclass
@@ -179,7 +181,7 @@ class CoreEngine:
         try:
             # Build stream callback wrapper
             stream_callback = self._make_stream_callback(
-                on_stream, tool_log, ctx.verbose_level if hasattr(ctx, 'verbose_level') else 1
+                on_stream, tool_log, ctx.verbose_level
             ) if on_stream else None
 
             # Call Claude
@@ -191,6 +193,7 @@ class CoreEngine:
                 on_stream=stream_callback,
                 force_new=False,
                 interrupt_event=interrupt_event,
+                images=ctx.images,
             )
 
             duration_ms = int((time.time() - start_time) * 1000)
